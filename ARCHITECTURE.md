@@ -116,7 +116,7 @@ When `revalidateTag("product")` is called, the handler iterates `sharedTagsMap` 
 
 ### 1. Redis Hash (persistent state)
 
-Every `set()` writes to both the local map **and** a Redis Hash (`HSET`). On startup, `initialSync()` uses `HSCAN` to load the full hash into memory. A periodic re-sync (default ~1 hour, jittered) guards against drift.
+Every `set()` writes to both the local map **and** a Redis Hash (`HSET`). On startup, `initialSync()` uses `HSCAN` to load the full hash into a new map, applies the changes that arrived during the scan, and then replaces the old map. A periodic re-sync (default ~1 hour, jittered) guards against drift.
 
 ### 2. Pub/Sub (real-time cross-instance sync)
 

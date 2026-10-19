@@ -82,6 +82,8 @@ export class SyncedMap<V> {
   private resubscribeNeeded = true;
   private reloadNeeded = false;
   private resyncTimer?: ReturnType<typeof setInterval>;
+  /** Changes made while a reload scans the hash, newest per key. */
+  private changesDuringReload?: Map<string, { value: V } | 'deleted'>;
   private closed = false;
   // Retry delays that close() must end.
   private retryWaits = new Set<() => void>();
@@ -204,6 +206,8 @@ export class SyncedMap<V> {
     // on large keyspaces (see issue #97). Bypass with sendCommand until redis ^5,
     // where SCAN/HSCAN keep cursor as a string.
     let cursor = '0';
+    const loaded = new Map<string, V>();
+    this.changesDuringReload = new Map();
 
     try {
       do {
@@ -222,18 +226,28 @@ export class SyncedMap<V> {
         for (let i = 0; i < tuples.length; i += 2) {
           const field = tuples[i];
           if (this.filterKeys(field)) {
-            this.map.set(field, JSON.parse(tuples[i + 1]));
+            loaded.set(field, JSON.parse(tuples[i + 1]));
           }
         }
         cursor = nextCursor;
       } while (cursor !== '0');
 
+      // The scan can read a field before a change that this instance saw
+      // during the scan, so those changes win over the scanned values.
+      for (const [key, change] of this.changesDuringReload) {
+        if (change === 'deleted') loaded.delete(key);
+        else loaded.set(key, change.value);
+      }
+      this.map = loaded;
+      this.changesDuringReload = undefined;
+
       // sharedTagsMap keys are cache keys (Redis strings). Tag-manifest maps
-      // use tag names as hash fields — those never appear in SCAN.
+      // use tag names as hash fields, which are never Redis keys.
       if (!this.customizedSync?.withoutOrphanCleanup) {
         await this.cleanupKeysNotInRedis();
       }
     } catch (error) {
+      this.changesDuringReload = undefined;
       console.error('Error during initial sync:', error);
       throw error;
     }
@@ -315,12 +329,12 @@ export class SyncedMap<V> {
       const syncMessage: SyncMessage<V> = JSON.parse(message);
       if (syncMessage.type === 'insert') {
         if (syncMessage.key !== undefined && syncMessage.value !== undefined) {
-          this.map.set(syncMessage.key, syncMessage.value);
+          this.setLocal(syncMessage.key, syncMessage.value);
         }
       } else if (syncMessage.type === 'delete') {
         if (syncMessage.keys) {
           for (const key of syncMessage.keys) {
-            this.map.delete(key);
+            this.deleteLocal(key);
           }
         }
       }
@@ -528,7 +542,7 @@ export class SyncedMap<V> {
       key,
       JSON.stringify(value)?.substring(0, 100),
     );
-    this.map.set(key, value);
+    this.setLocal(key, value);
     const operations = [];
 
     // This is needed if we only want to sync delete commands. This is especially useful for non serializable data like a promise map
@@ -587,7 +601,7 @@ export class SyncedMap<V> {
     const operations = [];
 
     for (const key of keysArray) {
-      this.map.delete(key);
+      this.deleteLocal(key);
     }
 
     if (!this.customizedSync?.withoutRedisHashmap) {
@@ -617,6 +631,16 @@ export class SyncedMap<V> {
       keys,
       operations.length,
     );
+  }
+
+  private setLocal(key: string, value: V) {
+    this.map.set(key, value);
+    this.changesDuringReload?.set(key, { value });
+  }
+
+  private deleteLocal(key: string) {
+    this.map.delete(key);
+    this.changesDuringReload?.set(key, 'deleted');
   }
 
   private async publishDeletion(keys: string[]): Promise<void> {
