@@ -37,7 +37,7 @@ export async function startNextFixture({
   readyPath = '/',
   readyTimeoutMs = 20_000,
 }: NextFixtureOptions): Promise<NextFixture> {
-  await Promise.all(ports.map((port) => stopKeptServer(appDir, port)));
+  await Promise.all(ports.map((port) => stopLeftoverServer(appDir, port)));
   await Promise.all(ports.map(assertPortIsFree));
 
   if (build) {
@@ -48,11 +48,11 @@ export async function startNextFixture({
   const servers = ports.map((port) => startServer(appDir, port, env));
   const stop = async () => {
     if (process.env.KEEP_SERVER_RUNNING === 'true') {
-      for (const server of servers) keepServer(appDir, server);
+      for (const { proc } of servers) proc.unref();
       console.log('keeping next server(s) running');
       return;
     }
-    await Promise.all(servers.map(({ proc }) => killGroup(proc)));
+    await Promise.all(servers.map((server) => stopServer(appDir, server)));
   };
 
   try {
@@ -62,7 +62,7 @@ export async function startNextFixture({
       ),
     );
   } catch (error) {
-    await Promise.all(servers.map(({ proc }) => killGroup(proc)));
+    await Promise.all(servers.map((server) => stopServer(appDir, server)));
     throw error;
   }
 
@@ -100,6 +100,10 @@ function startServer(
     stdio: 'pipe',
     detached: true,
   });
+  if (proc.pid !== undefined) {
+    mkdirSync(join(appDir, '.next'), { recursive: true });
+    writeFileSync(serverPidFile(appDir, port), String(proc.pid));
+  }
   const output = collectOutput(proc, `next :${port}`, true);
   return { port, url: `http://localhost:${port}`, proc, output };
 }
@@ -175,25 +179,21 @@ async function killProcessGroup(pgid: number) {
   if (groupIsAlive(pgid)) process.kill(-pgid, 'SIGKILL');
 }
 
-async function killGroup(proc: ChildProcessWithoutNullStreams) {
-  if (proc.pid !== undefined) await killProcessGroup(proc.pid);
+async function stopServer(appDir: string, server: Server) {
+  if (server.proc.pid !== undefined) await killProcessGroup(server.proc.pid);
+  rmSync(serverPidFile(appDir, server.port), { force: true });
 }
 
-// KEEP_SERVER_RUNNING leaves the server up after the run. Record its process
-// group so the next run can stop exactly that server before it reuses the port.
-function keptServerFile(appDir: string, port: number) {
-  return join(appDir, '.next', `kept-server-${port}.pid`);
+// Each server records its process group until stop() kills it. A file that
+// is still there belongs to a run that was interrupted or that used
+// KEEP_SERVER_RUNNING, so the next run stops exactly that server before it
+// reuses the port.
+function serverPidFile(appDir: string, port: number) {
+  return join(appDir, '.next', `next-fixture-${port}.pid`);
 }
 
-function keepServer(appDir: string, server: Server) {
-  if (server.proc.pid === undefined) return;
-  mkdirSync(join(appDir, '.next'), { recursive: true });
-  writeFileSync(keptServerFile(appDir, server.port), String(server.proc.pid));
-  server.proc.unref();
-}
-
-async function stopKeptServer(appDir: string, port: number) {
-  const file = keptServerFile(appDir, port);
+async function stopLeftoverServer(appDir: string, port: number) {
+  const file = serverPidFile(appDir, port);
   if (!existsSync(file)) return;
   const pgid = Number(readFileSync(file, 'utf8'));
   rmSync(file);
