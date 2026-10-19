@@ -8,6 +8,7 @@ import { shouldDeferRedisConnection } from './utils/redisConnection';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
 import { clusterSafeUnlink } from './utils/clusterSafeUnlink';
+import { compareAndUnlink } from './utils/compareAndUnlink';
 
 export type Client = ReturnType<typeof createClient>;
 
@@ -648,33 +649,22 @@ export default class RedisStringsHandler {
           if (revalidationTime && revalidationTime > cacheEntry.lastModified) {
             const redisKey = this.keyPrefix + key;
 
-            // We don't await this cleanup since it can happen asynchronously in the background.
-            // The cache entry is already considered invalid at this point.
-            this.client
-              .unlink(redisKey)
-              .catch((err) => {
-                // Log error but don't retry deletion since the cache entry will likely be
-                // updated immediately after via set(). A retry could dangerously execute
-                // after the new value is set.
-                console.error(
-                  'Error occurred while unlinking stale data. Error was:',
-                  err,
-                );
-              })
-              .finally(async () => {
-                // Only FETCH reads clear the shared revalidation marker. A page/route
-                // entry and one or more nested FETCH entries can all be tagged with
-                // the same implicit tag; if a page/route read deleted the marker
-                // here, a not-yet-read FETCH entry sharing that tag would lose the
-                // only signal it has that it is stale (its own Redis key can still
-                // exist when the direct sharedTagsMap-based delete in
-                // revalidateTag() raced with this entry's set()). Only FETCH reads
-                // are the intended (and only) consumer of this marker, so only they
-                // retire it once observed.
-                if (ctx.kind === 'FETCH') {
-                  await this.revalidatedTagsMap.delete(tag);
-                }
-              });
+            // Remove only this key, and only while it still holds the stale
+            // value: a concurrent set() can already have written the
+            // replacement. Keep the tag record in revalidatedTagsMap, because
+            // every other entry under the tag needs it to see that it is
+            // stale. Keep the sharedTagsMap membership too: the replacement
+            // can own it, and the orphan cleanup removes it once the key is gone.
+            void compareAndUnlink(
+              this.client,
+              redisKey,
+              serializedCacheEntry,
+            ).catch((err) => {
+              console.error(
+                'Error occurred while unlinking stale data. Error was:',
+                err,
+              );
+            });
 
             debug(
               'green',
