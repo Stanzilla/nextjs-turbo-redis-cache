@@ -39,12 +39,16 @@ export class ErrorBudget {
   }
 }
 
-export function disconnectAndExit(client: Client | undefined): void {
+export function closeClient(client: Client | undefined): void {
   try {
     client?.disconnect().catch(() => {});
   } catch {
     // The client was not created or is already closed.
   }
+}
+
+export function disconnectAndExit(client: Client | undefined): void {
+  closeClient(client);
   setTimeout(() => {
     process.exit(1);
   }, 500);
