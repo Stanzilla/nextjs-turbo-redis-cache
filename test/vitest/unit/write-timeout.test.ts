@@ -175,7 +175,7 @@ describe(`Redis writes with redis ${redisPackage.version} when Redis stops answe
     expect(consoleSpy.error).not.toHaveBeenCalled();
   });
 
-  it('Cache Components get() still removes the tag record when the unlink script answers after getTimeoutMs', async () => {
+  it('Cache Components get() still removes the stale entry when the unlink script answers after getTimeoutMs', async () => {
     await components.set('entry-e', componentsEntry(['tag-e']));
     await new Promise((resolve) => setTimeout(resolve, 5));
     await components.updateTags(['tag-e']);
@@ -183,58 +183,11 @@ describe(`Redis writes with redis ${redisPackage.version} when Redis stops answe
     server.pause(['EVAL']);
 
     expect(await components.get('entry-e', [])).toBeUndefined();
+    expect(server.store.has('components:entry-e')).toBe(true);
     server.resume();
 
     await vi.waitFor(() =>
-      expect(server.received).toContainEqual([
-        'HDEL',
-        'components:__cacheComponents_sharedTags__',
-        'entry-e',
-      ]),
+      expect(server.store.has('components:entry-e')).toBe(false),
     );
-  });
-
-  it('Cache Components get() keeps the tag record of an entry regenerated before the late unlink answers', async () => {
-    await components.set('entry-f', componentsEntry(['tag-f']));
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    await components.updateTags(['tag-f']);
-    spyOnConsole();
-    server.pause(['EVAL']);
-
-    expect(await components.get('entry-f', [])).toBeUndefined();
-    await components.set('entry-f', componentsEntry(['tag-f']));
-    server.resume();
-
-    expect(await components.get('entry-f', [])).toBeDefined();
-    // One more round trip, so a cleanup sent after the EVAL reply has reached the server.
-    await components.get('entry-f', []);
-    const sharedTagsKey = 'components:__cacheComponents_sharedTags__';
-    expect(server.received).not.toContainEqual([
-      'HDEL',
-      sharedTagsKey,
-      'entry-f',
-    ]);
-    expect(server.received).not.toContainEqual([
-      'PUBLISH',
-      'components::sync-channel:__cacheComponents_sharedTags__',
-      JSON.stringify({ type: 'delete', keys: ['entry-f'] }),
-    ]);
-  });
-
-  it('Cache Components get() of a stale entry is a miss after getTimeoutMs when Redis stalls after the unlink script', async () => {
-    await components.set('entry-d', componentsEntry(['tag-d']));
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    await components.updateTags(['tag-d']);
-    const consoleSpy = spyOnConsole();
-    server.pause(['HDEL']);
-
-    const pendingGet = components.get('entry-d', []);
-    const { outcome, elapsedMs } = await settleWithin(pendingGet);
-
-    expect(outcome).toBe('resolved');
-    expect(await pendingGet).toBeUndefined();
-    expect(elapsedMs).toBeLessThan(1_000);
-    expect(consoleSpy.warn).toHaveBeenCalledOnce();
-    expect(consoleSpy.error).not.toHaveBeenCalled();
   });
 });

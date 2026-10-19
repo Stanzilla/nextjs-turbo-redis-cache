@@ -51,7 +51,9 @@ type StoredCacheEntry = Omit<CacheComponentsEntry, 'value'> & {
 };
 
 const REVALIDATED_TAGS_KEY = '__cacheComponents_revalidated_tags__';
-const SHARED_TAGS_KEY = '__cacheComponents_sharedTags__';
+// Older versions kept a tag index in this hash. It is not read anymore, but
+// it can still be in Redis, so it must not look like a cache entry.
+const LEGACY_SHARED_TAGS_KEY = '__cacheComponents_sharedTags__';
 
 let killContainerOnErrorCount = 0;
 
@@ -100,7 +102,6 @@ function bufferToReadableStream(
 class RedisCacheComponentsHandler implements CacheComponentsHandler {
   private client: Client;
   private revalidatedTagsMap: SyncedMap<TagManifestEntry | number>;
-  private sharedTagsMap: SyncedMap<string[]>;
   private inMemoryDeduplicationCache: SyncedMap<Promise<string | null>>;
   private keyPrefix: string;
   private getTimeoutMs: number;
@@ -112,12 +113,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
   >;
   private deduplicatedRedisGet: (key: string) => AbortableGet;
   private redisGetDeduplication: boolean;
-  private inMemoryCachingTime: number;
   private redisConnectionDeferred: boolean;
-  private pendingStaleRemovals = new Map<
-    string,
-    Set<{ superseded: boolean }>
-  >();
 
   constructor({
     redisUrl = process.env.REDIS_URL
@@ -154,7 +150,6 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       this.getTimeoutMs = getTimeoutMs;
       this.writeTimeoutMs = writeTimeoutMs;
       this.redisGetDeduplication = redisGetDeduplication;
-      this.inMemoryCachingTime = inMemoryCachingTime;
       this.redisConnectionDeferred = shouldDeferRedisConnection();
 
       this.client = createClient({
@@ -221,7 +216,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       }
 
       const filterKeys = (key: string): boolean =>
-        key !== REVALIDATED_TAGS_KEY && key !== SHARED_TAGS_KEY;
+        key !== REVALIDATED_TAGS_KEY && key !== LEGACY_SHARED_TAGS_KEY;
 
       this.revalidatedTagsMap = new SyncedMap<TagManifestEntry | number>({
         client: this.client,
@@ -233,19 +228,6 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         customizedSync: { withoutOrphanCleanup: true },
         resyncIntervalMs:
           avgResyncIntervalMs +
-          avgResyncIntervalMs / 10 +
-          Math.random() * (avgResyncIntervalMs / 10),
-      });
-
-      this.sharedTagsMap = new SyncedMap<string[]>({
-        client: this.client,
-        keyPrefix: this.keyPrefix,
-        redisKey: SHARED_TAGS_KEY,
-        database,
-        querySize: revalidateTagQuerySize,
-        filterKeys,
-        resyncIntervalMs:
-          avgResyncIntervalMs -
           avgResyncIntervalMs / 10 +
           Math.random() * (avgResyncIntervalMs / 10),
       });
@@ -280,10 +262,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
 
   private async assertClientIsReady(): Promise<void> {
     if (this.redisConnectionDeferred) {
-      await SyncedMap.waitUntilAllReady([
-        this.revalidatedTagsMap,
-        this.sharedTagsMap,
-      ]);
+      await SyncedMap.waitUntilAllReady([this.revalidatedTagsMap]);
       return;
     }
 
@@ -296,10 +275,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         throw error;
       });
     }
-    await SyncedMap.waitUntilAllReady([
-      this.revalidatedTagsMap,
-      this.sharedTagsMap,
-    ]);
+    await SyncedMap.waitUntilAllReady([this.revalidatedTagsMap]);
   }
 
   private isClientUnavailable(): boolean {
@@ -371,29 +347,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
             continue;
           }
 
-          // The tag cleanup is part of the raced operation, so it still runs
-          // when the unlink answers after the deadline. A set() that sends its
-          // SET after this EVAL supersedes the removal, so a late cleanup
-          // cannot delete the tag record of the replacement entry.
-          const pending = { superseded: false };
-          const removals = this.pendingStaleRemovals.get(cacheKey) ?? new Set();
-          removals.add(pending);
-          this.pendingStaleRemovals.set(cacheKey, removals);
-          const removal = compareAndUnlink(this.client, redisKey, serialized)
-            .then(async (dropped) => {
-              if (dropped && !pending.superseded) {
-                await this.sharedTagsMap.delete(cacheKey).catch(() => {});
-              }
-            })
-            .finally(() => {
-              removals.delete(pending);
-              if (
-                removals.size === 0 &&
-                this.pendingStaleRemovals.get(cacheKey) === removals
-              ) {
-                this.pendingStaleRemovals.delete(cacheKey);
-              }
-            });
+          const removal = compareAndUnlink(this.client, redisKey, serialized);
           try {
             await untilDeadline(
               removal,
@@ -497,10 +451,6 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
 
       const redisKey = `${this.keyPrefix}${cacheKey}`;
 
-      for (const pending of this.pendingStaleRemovals.get(cacheKey) ?? []) {
-        pending.superseded = true;
-      }
-
       const setOperation = redisErrorHandler(
         'RedisCacheComponentsHandler.set(), operation: set ' + redisKey,
         this.client.set(redisKey, serialized, {
@@ -521,26 +471,8 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         this.inMemoryDeduplicationCache.delete(cacheKey),
       );
 
-      let tagsOperation: Promise<void> | undefined;
-      const tags = stored.tags || [];
-      if (tags.length > 0) {
-        const currentTags = this.sharedTagsMap.get(cacheKey);
-        const currentIsSameAsNew =
-          currentTags?.length === tags.length &&
-          currentTags.every((v) => tags.includes(v)) &&
-          tags.every((v) => currentTags!.includes(v));
-
-        if (!currentIsSameAsNew) {
-          tagsOperation = this.sharedTagsMap.set(cacheKey, [...tags]);
-        }
-      }
-
       await untilDeadline(
-        Promise.all([
-          setOperation,
-          tagsOperation,
-          invalidateDeduplicationCacheOperation,
-        ]),
+        Promise.all([setOperation, invalidateDeduplicationCacheOperation]),
         AbortSignal.timeout(this.writeTimeoutMs),
       );
     } catch (error) {
@@ -606,14 +538,8 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         );
       }
 
-      if (this.redisGetDeduplication && this.inMemoryCachingTime > 0) {
-        for (const [key, sharedTags] of this.sharedTagsMap.entries()) {
-          if (sharedTags.some((tag) => updated.has(tag))) {
-            writes.push(this.inMemoryDeduplicationCache.delete(key, true));
-          }
-        }
-      }
-
+      // No in-memory cache eviction is necessary: get() checks every entry,
+      // also one from the in-memory cache, against the tag manifest.
       await untilDeadline(
         Promise.all(writes),
         AbortSignal.timeout(this.writeTimeoutMs),
