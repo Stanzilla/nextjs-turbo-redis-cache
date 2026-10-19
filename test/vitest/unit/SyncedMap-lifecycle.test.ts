@@ -135,4 +135,17 @@ describe('SyncedMap lifecycle', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(client.scans).toHaveLength(1);
   });
+
+  it('leaves no retry timer behind after close()', async () => {
+    const client = new ScanClient();
+    const map = createMap(client);
+    await vi.advanceTimersByTimeAsync(0);
+    client.scans[0].reject(new Error('socket closed'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    await map.close();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
