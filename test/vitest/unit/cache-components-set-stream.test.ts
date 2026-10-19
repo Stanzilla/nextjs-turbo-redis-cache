@@ -1,52 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const hoisted = vi.hoisted(() => {
-  const store = new Map<string, string>();
-  return { store };
-});
+const hoisted = await vi.hoisted(async () =>
+  (await import('./utils/redisMock')).createRedisMockState(),
+);
 
-vi.mock('redis', () => {
-  const createClient = () => ({
-    isReady: true,
-    isOpen: true,
-    on: vi.fn(),
-    connect: vi.fn(async () => undefined),
-    disconnect: vi.fn(),
-    quit: vi.fn(),
-    duplicate: vi.fn(() => ({
-      connect: vi.fn(async () => undefined),
-      subscribe: vi.fn(async () => undefined),
-      on: vi.fn(),
-      quit: vi.fn(async () => undefined),
-      configGet: vi.fn(async () => ({ 'notify-keyspace-events': 'Exe' })),
-      isOpen: true,
-      isReady: true,
-    })),
-    get: vi.fn(
-      async (_opts: unknown, key: string) => hoisted.store.get(key) ?? null,
-    ),
-    sendCommand: vi.fn(async (args: string[]) => {
-      const [command] = args;
-      if (command === 'HSCAN' || command === 'SCAN') {
-        return ['0', []];
-      }
-      throw new Error(`Unexpected sendCommand: ${command}`);
-    }),
-    hSet: vi.fn(async () => 1),
-    hDel: vi.fn(async () => 1),
-    publish: vi.fn(async () => 1),
-    unlink: vi.fn(async () => 1),
-    set: vi.fn(async (key: string, value: string) => {
-      hoisted.store.set(key, value);
-      return 'OK';
-    }),
-  });
-
-  return {
-    createClient,
-    commandOptions: vi.fn((opts) => opts),
-  };
-});
+vi.mock('redis', async () =>
+  (await import('./utils/redisMock')).createRedisModuleMock(hoisted),
+);
 
 const KEY_PREFIX = 'stream:';
 
@@ -69,7 +29,7 @@ describe('RedisCacheComponentsHandler.set() stream handling', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    hoisted.store.clear();
+    hoisted.reset();
     vi.resetModules();
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
   });

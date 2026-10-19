@@ -4,53 +4,13 @@ import RedisStringsHandler, {
   CacheEntry,
 } from '../../../src/RedisStringsHandler';
 
-// In-memory Redis string store shared between the mocked client and the tests
-const hoisted = vi.hoisted(() => {
-  const store = new Map<string, { value: string; ex?: number }>();
-  return { store };
-});
+const hoisted = await vi.hoisted(async () =>
+  (await import('./utils/redisMock')).createRedisMockState(),
+);
 
-vi.mock('redis', () => {
-  const createClient = () => {
-    return {
-      isReady: true,
-      on: vi.fn(),
-      connect: vi.fn(async () => undefined),
-      disconnect: vi.fn(),
-      quit: vi.fn(),
-      duplicate: vi.fn(() => ({
-        connect: vi.fn(async () => undefined),
-        subscribe: vi.fn(async () => undefined),
-        on: vi.fn(),
-        quit: vi.fn(async () => undefined),
-        configGet: vi.fn(async () => ({ 'notify-keyspace-events': 'Exe' })),
-      })),
-      get: vi.fn(
-        async (_opts: unknown, key: string) =>
-          hoisted.store.get(key)?.value ?? null,
-      ),
-      sendCommand: vi.fn(async (args: string[]) => {
-        const [command] = args;
-        if (command === 'HSCAN' || command === 'SCAN') {
-          return ['0', []];
-        }
-        throw new Error(`Unexpected sendCommand: ${command}`);
-      }),
-      hSet: vi.fn(async () => 1),
-      hDel: vi.fn(async () => 1),
-      publish: vi.fn(async () => 1),
-      unlink: vi.fn(async () => 1),
-      set: vi.fn(async (key: string, value: string, opts?: { EX?: number }) => {
-        hoisted.store.set(key, { value, ex: opts?.EX });
-        return 'OK';
-      }),
-    };
-  };
-  return {
-    createClient,
-    commandOptions: vi.fn((opts) => opts),
-  };
-});
+vi.mock('redis', async () =>
+  (await import('./utils/redisMock')).createRedisModuleMock(hoisted),
+);
 
 const KEY_PREFIX = 'test:';
 const DEFAULT_STALE_AGE = 60 * 60 * 24 * 14;
@@ -71,7 +31,7 @@ function createHandler() {
 function storedEntry(key: string): { entry: CacheEntry; ex?: number } {
   const raw = hoisted.store.get(KEY_PREFIX + key);
   expect(raw).toBeDefined();
-  return { entry: JSON.parse(raw!.value), ex: raw!.ex };
+  return { entry: JSON.parse(raw!), ex: hoisted.expiry.get(KEY_PREFIX + key) };
 }
 
 const baseCtx = { isRoutePPREnabled: false, isFallback: false };
@@ -81,7 +41,7 @@ describe('RedisStringsHandler Pages Router kinds', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    hoisted.store.clear();
+    hoisted.reset();
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
   });
@@ -292,9 +252,10 @@ describe('RedisStringsHandler Pages Router kinds', () => {
 
     it('get() misses and warns for a malformed entry with a missing (undefined) value', async () => {
       const handler = createHandler();
-      hoisted.store.set(KEY_PREFIX + '/malformed', {
-        value: JSON.stringify({ lastModified: Date.now(), tags: [] }),
-      });
+      hoisted.store.set(
+        KEY_PREFIX + '/malformed',
+        JSON.stringify({ lastModified: Date.now(), tags: [] }),
+      );
 
       const result = await handler.get('/malformed', {
         kind: 'PAGES',
@@ -325,9 +286,7 @@ describe('RedisStringsHandler Pages Router kinds', () => {
       ['missing tags', { value, lastModified: Date.now() }],
     ])('get() misses for an entry with %s', async (reason, entry) => {
       const handler = createHandler();
-      hoisted.store.set(KEY_PREFIX + 'fetch-key', {
-        value: JSON.stringify(entry),
-      });
+      hoisted.store.set(KEY_PREFIX + 'fetch-key', JSON.stringify(entry));
 
       const result = await handler.get('fetch-key', fetchCtx as never);
 
