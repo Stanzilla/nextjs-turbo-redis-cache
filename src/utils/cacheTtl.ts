@@ -52,8 +52,11 @@ export function resolveCacheEntryTtlSeconds(
 }
 
 // Redis `SET ... EX` rejects non-integer values, and the default
-// estimateExpireAge (revalidate * 1.2) is often fractional.
-function toWholeSeconds(seconds: number): number {
+// estimateExpireAge (revalidate * 1.2) is often fractional. The minimum TTL is
+// 1 second, so a result of 0 or less becomes 1. A result of NaN or Infinity
+// sets no TTL.
+function toWholeSeconds(seconds: number): number | undefined {
+  if (!Number.isFinite(seconds)) return undefined;
   return Math.max(1, Math.ceil(seconds));
 }
 
