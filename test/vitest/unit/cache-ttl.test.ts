@@ -64,4 +64,25 @@ describe('resolveCacheEntryTtlSeconds', () => {
 
     expect(ttl).toBe(72);
   });
+
+  it('rounds a fractional estimateExpireAge result up to whole seconds', () => {
+    // Redis SET EX only accepts integers; 7 * 1.2 = 8.4 made SET fail.
+    const ttl = resolveCacheEntryTtlSeconds(
+      { cacheControl: { revalidate: 7, expire: undefined } },
+      { kind: 'APP_PAGE' },
+      { estimateExpireAge, defaultStaleAge },
+    );
+
+    expect(ttl).toBe(9);
+  });
+
+  it('never returns a TTL below one second', () => {
+    const ttl = resolveCacheEntryTtlSeconds(
+      { revalidate: 1 },
+      { kind: 'PAGES' },
+      { estimateExpireAge: (staleAge) => staleAge * 0.1, defaultStaleAge },
+    );
+
+    expect(ttl).toBe(1);
+  });
 });

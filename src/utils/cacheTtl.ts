@@ -41,14 +41,20 @@ export function resolveCacheEntryTtlSeconds(
   const revalidate = resolveRevalidateValue(ctx, data);
 
   if (revalidate === false) {
-    return options.estimateExpireAge(options.defaultStaleAge);
+    return toWholeSeconds(options.estimateExpireAge(options.defaultStaleAge));
   }
 
   if (revalidate && Number.isSafeInteger(revalidate) && revalidate > 0) {
-    return options.estimateExpireAge(revalidate);
+    return toWholeSeconds(options.estimateExpireAge(revalidate));
   }
 
   return undefined;
+}
+
+// Redis `SET ... EX` rejects non-integer values, and the default
+// estimateExpireAge (revalidate * 1.2) is often fractional.
+function toWholeSeconds(seconds: number): number {
+  return Math.max(1, Math.ceil(seconds));
 }
 
 function resolveRevalidateValue(
