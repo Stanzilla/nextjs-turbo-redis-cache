@@ -193,6 +193,8 @@ lint-and-unit                        → Lint + Unit Tests + Coverage
 
 `lint-and-unit` runs first as a gate. All other jobs run in parallel after it passes.
 
+The jobs that need Redis use the local composite action `.github/actions/setup-redis`. It starts Redis 7 on port 6379, installs `redis-cli`, waits for `PING` and enables keyspace notifications (`Exe`).
+
 | CI Job                         | Test App(s)                                                                                                                                     | What runs                                                       |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | `lint-and-unit`                | —                                                                                                                                               | `pnpm lint` + `pnpm test:unit:coverage`                         |
