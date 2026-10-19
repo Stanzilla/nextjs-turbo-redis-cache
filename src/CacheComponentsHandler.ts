@@ -1,15 +1,15 @@
 import { createClient } from 'redis';
 import type { RedisClientOptions } from 'redis';
-import {
-  Client,
-  CreateRedisStringsHandlerOptions,
-  redisErrorHandler,
-} from './RedisStringsHandler';
+import type { CreateRedisStringsHandlerOptions } from './RedisStringsHandler';
 import { SyncedMap } from './SyncedMap';
 import { DeduplicatedRequestHandler } from './DeduplicatedRequestHandler';
 import { debug } from './utils/debug';
 import { resolveKeyPrefix } from './utils/prefix';
-import { shouldDeferRedisConnection } from './utils/redisConnection';
+import {
+  type Client,
+  redisErrorHandler,
+  shouldDeferRedisConnection,
+} from './utils/redisConnection';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { compareAndUnlink } from './utils/compareAndUnlink';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';

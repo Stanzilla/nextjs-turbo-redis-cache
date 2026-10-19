@@ -1,5 +1,5 @@
 // SyncedMap.ts
-import { Client, redisErrorHandler } from './RedisStringsHandler';
+import { type Client, redisErrorHandler } from './utils/redisConnection';
 import { debugVerbose, debug } from './utils/debug';
 import { shouldDeferRedisConnection } from './utils/redisConnection';
 
