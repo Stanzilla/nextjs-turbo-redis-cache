@@ -7,10 +7,12 @@ type CustomizedSync = {
   withoutRedisHashmap?: boolean;
   withoutSetSync?: boolean;
   /**
-   * Skip SCAN-based orphan cleanup. Required for maps whose keys are not Redis
-   * string keys (tag manifests). Otherwise startup/resync HDELs every tag.
+   * The hash fields are not Redis string keys (tag names). Such a map skips
+   * the SCAN-based orphan cleanup, which would HDEL every tag, and the
+   * expired/evicted keyevents, which would HDEL a tag whose name equals an
+   * expired cache key.
    */
-  withoutOrphanCleanup?: boolean;
+  fieldsAreNotRedisKeys?: boolean;
 };
 
 type SyncedMapOptions = {
@@ -243,7 +245,7 @@ export class SyncedMap<V> {
 
       // sharedTagsMap keys are cache keys (Redis strings). Tag-manifest maps
       // use tag names as hash fields, which are never Redis keys.
-      if (!this.customizedSync?.withoutOrphanCleanup) {
+      if (!this.customizedSync?.fieldsAreNotRedisKeys) {
         await this.cleanupKeysNotInRedis();
       }
     } catch (error) {
@@ -380,8 +382,11 @@ export class SyncedMap<V> {
 
       await subscriber.connect();
 
+      const keyEvents = !this.customizedSync?.fieldsAreNotRedisKeys;
+
       // Check if keyspace event configuration is set correctly
       if (
+        keyEvents &&
         (process.env.SKIP_KEYSPACE_CONFIG_CHECK || '').toUpperCase() !== 'TRUE'
       ) {
         const keyspaceEventConfig = (
@@ -420,14 +425,18 @@ export class SyncedMap<V> {
         // Also we can send the value in the message for insert
         subscriber.subscribe(this.syncChannel, syncHandler),
         // Subscribe to Redis keyevent notifications for evicted and expired keys
-        subscriber.subscribe(
-          `__keyevent@${this.database}__:evicted`,
-          keyEventHandler,
-        ),
-        subscriber.subscribe(
-          `__keyevent@${this.database}__:expired`,
-          keyEventHandler,
-        ),
+        ...(keyEvents
+          ? [
+              subscriber.subscribe(
+                `__keyevent@${this.database}__:evicted`,
+                keyEventHandler,
+              ),
+              subscriber.subscribe(
+                `__keyevent@${this.database}__:expired`,
+                keyEventHandler,
+              ),
+            ]
+          : []),
       ]);
     } catch (error) {
       console.error('Error setting up pub/sub client:', error);

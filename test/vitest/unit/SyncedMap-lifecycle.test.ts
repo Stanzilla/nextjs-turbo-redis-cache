@@ -59,7 +59,7 @@ function createMap(client: ScanClient) {
     querySize: 250,
     filterKeys: () => true,
     resyncIntervalMs: 1_000,
-    customizedSync: { withoutOrphanCleanup: true },
+    customizedSync: { fieldsAreNotRedisKeys: true },
   });
   maps.push(map);
   return map;
