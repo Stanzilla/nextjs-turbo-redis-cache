@@ -10,6 +10,7 @@ import {
   RedisNotReadyError,
   redisErrorHandler,
   shouldDeferRedisConnection,
+  waitForReadiness,
 } from './utils/redisConnection';
 import {
   ErrorBudget,
@@ -270,9 +271,15 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     }
   }
 
-  private async assertClientIsReady(): Promise<void> {
+  private async assertClientIsReady(readyTimeoutMs: number): Promise<void> {
+    const waitForTags = () =>
+      waitForReadiness(
+        (timeoutMs) =>
+          SyncedMap.waitUntilAllReady([this.revalidatedTagsMap], timeoutMs),
+        readyTimeoutMs,
+      );
     if (this.redisConnectionDeferred) {
-      await SyncedMap.waitUntilAllReady([this.revalidatedTagsMap]);
+      await waitForTags();
       return;
     }
 
@@ -287,7 +294,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         );
       });
     }
-    await SyncedMap.waitUntilAllReady([this.revalidatedTagsMap]);
+    await waitForTags();
   }
 
   private isClientUnavailable(): boolean {
@@ -313,7 +320,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     const redisKey = `${this.keyPrefix}${cacheKey}`;
 
     try {
-      await this.assertClientIsReady();
+      await this.assertClientIsReady(this.getTimeoutMs);
       if (this.isClientUnavailable()) {
         return undefined;
       }
@@ -411,7 +418,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     pendingEntry: Promise<CacheComponentsEntry>,
   ): Promise<void> {
     try {
-      await this.assertClientIsReady();
+      await this.assertClientIsReady(this.writeTimeoutMs);
       if (this.isClientUnavailable()) {
         return;
       }
@@ -485,7 +492,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
 
   async refreshTags(): Promise<void> {
     try {
-      await this.assertClientIsReady();
+      await this.assertClientIsReady(this.getTimeoutMs);
     } catch (error) {
       console.error(
         'RedisCacheComponentsHandler.refreshTags() Redis is not ready. The original error was:',
@@ -496,7 +503,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
 
   async getExpiration(tags: string[]): Promise<number> {
     try {
-      await this.assertClientIsReady();
+      await this.assertClientIsReady(this.getTimeoutMs);
       return maxExpiredTimestamp(tags || [], (tag) => this.tagManifestFor(tag));
     } catch (error) {
       console.error(
@@ -512,7 +519,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     durations?: { expire?: number },
   ): Promise<void> {
     try {
-      await this.assertClientIsReady();
+      await this.assertClientIsReady(this.writeTimeoutMs);
       if (this.isClientUnavailable()) {
         return;
       }

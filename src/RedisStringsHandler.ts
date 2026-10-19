@@ -9,6 +9,7 @@ import {
   RedisNotReadyError,
   redisErrorHandler,
   shouldDeferRedisConnection,
+  waitForReadiness,
 } from './utils/redisConnection';
 import {
   ErrorBudget,
@@ -462,19 +463,15 @@ export default class RedisStringsHandler {
 
   resetRequestCache(): void {}
 
-  private clientReadyCalls = 0;
-
-  private async assertClientIsReady(): Promise<void> {
-    if (this.clientReadyCalls > 10) {
-      throw new Error(
-        'assertClientIsReady called more than 10 times without being ready.',
-      );
-    }
-    await SyncedMap.waitUntilAllReady([
-      this.sharedTagsMap,
-      this.revalidatedTagsMap,
-    ]);
-    this.clientReadyCalls = 0;
+  private async assertClientIsReady(readyTimeoutMs: number): Promise<void> {
+    await waitForReadiness(
+      (timeoutMs) =>
+        SyncedMap.waitUntilAllReady(
+          [this.sharedTagsMap, this.revalidatedTagsMap],
+          timeoutMs,
+        ),
+      readyTimeoutMs,
+    );
     if (!this.client.isReady) {
       if (this.redisConnectionDeferred) {
         return;
@@ -502,7 +499,7 @@ export default class RedisStringsHandler {
       }
 
       debug('green', 'RedisStringsHandler.get() called with', key, ctx);
-      await this.assertClientIsReady();
+      await this.assertClientIsReady(this.getTimeoutMs);
       if (this.isClientUnavailable()) {
         return null;
       }
@@ -720,7 +717,7 @@ export default class RedisStringsHandler {
         );
       }
 
-      await this.assertClientIsReady();
+      await this.assertClientIsReady(this.writeTimeoutMs);
       if (this.isClientUnavailable()) {
         return;
       }
@@ -874,7 +871,7 @@ export default class RedisStringsHandler {
         rest,
       );
       const tags = new Set([tagOrTags || []].flat());
-      await this.assertClientIsReady();
+      await this.assertClientIsReady(this.writeTimeoutMs);
       if (this.isClientUnavailable()) {
         return;
       }
