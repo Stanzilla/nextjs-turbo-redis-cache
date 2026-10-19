@@ -46,8 +46,9 @@ export interface CacheComponentsHandler {
   updateTags(tags: string[], durations?: { expire?: number }): Promise<void>;
 }
 
+// The JSON form in Redis. The value is the stream content as base64.
 type StoredCacheEntry = Omit<CacheComponentsEntry, 'value'> & {
-  value: Uint8Array | string;
+  value: string;
 };
 
 const REVALIDATED_TAGS_KEY = '__cacheComponents_revalidated_tags__';
@@ -88,9 +89,14 @@ async function streamToBuffer(
   return result;
 }
 
-function bufferToReadableStream(
-  buffer: Uint8Array,
-): ReadableStream<Uint8Array> {
+async function encodeValue(
+  stream: ReadableStream<Uint8Array>,
+): Promise<string> {
+  return Buffer.from(await streamToBuffer(stream)).toString('base64');
+}
+
+function decodeValue(base64: string): ReadableStream<Uint8Array> {
+  const buffer = new Uint8Array(Buffer.from(base64, 'base64'));
   return new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(buffer);
@@ -367,14 +373,9 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
           return undefined;
         }
 
-        const valueBuffer =
-          typeof stored.value === 'string'
-            ? new Uint8Array(Buffer.from(stored.value, 'base64'))
-            : stored.value;
-
         const entry: CacheComponentsEntry = {
           ...stored,
-          value: bufferToReadableStream(valueBuffer),
+          value: decodeValue(stored.value),
         };
 
         if (
@@ -411,33 +412,15 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
 
       const entry = await pendingEntry;
 
-      const buffer = await streamToBuffer(entry.value);
-
       const stored: StoredCacheEntry = {
-        value: Buffer.from(buffer).toString('base64'),
-        tags: entry.tags || [],
-        stale: entry.stale,
-        timestamp: entry.timestamp,
-        expire: entry.expire,
-        revalidate: entry.revalidate,
+        value: await encodeValue(entry.value),
+        tags: Array.isArray(entry.tags) ? [...entry.tags] : [],
+        stale: Number(entry.stale),
+        timestamp: Number(entry.timestamp),
+        expire: Number(entry.expire),
+        revalidate: Number(entry.revalidate),
       };
-
-      let serialized: string;
-      try {
-        const cleanStored = {
-          value: stored.value,
-          tags: Array.isArray(stored.tags) ? [...stored.tags] : [],
-          stale: Number(stored.stale),
-          timestamp: Number(stored.timestamp),
-          expire: Number(stored.expire),
-          revalidate: Number(stored.revalidate),
-        };
-        serialized = JSON.stringify(cleanStored);
-      } catch (jsonError) {
-        console.error('JSON.stringify error:', jsonError);
-        console.error('Stored object:', stored);
-        throw jsonError;
-      }
+      const serialized = JSON.stringify(stored);
 
       const seed = this.redisGetDeduplication
         ? this.redisDeduplicationHandler.seedRequestReturn(cacheKey, serialized)
