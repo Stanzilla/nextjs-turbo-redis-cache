@@ -4,7 +4,6 @@ import { DeduplicatedRequestHandler } from './DeduplicatedRequestHandler';
 import { resolveKeyPrefix } from './utils/prefix';
 import {
   type Client,
-  RedisNotReadyError,
   redisErrorHandler,
   shouldDeferRedisConnection,
   waitForReadiness,
@@ -233,30 +232,14 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     }
   }
 
+  // Reads never reconnect: a closed client stays closed until its reconnect
+  // owner (createCacheClient or a user reconnectStrategy) opens it again.
   private async assertClientIsReady(readyTimeoutMs: number): Promise<void> {
-    const waitForTags = () =>
-      waitForReadiness(
-        (timeoutMs) =>
-          SyncedMap.waitUntilAllReady([this.revalidatedTagsMap], timeoutMs),
-        readyTimeoutMs,
-      );
-    if (this.redisConnectionDeferred) {
-      await waitForTags();
-      return;
-    }
-
-    if (!this.client.isReady && !this.client.isOpen) {
-      await this.client.connect().catch((error) => {
-        console.error(
-          'RedisCacheComponentsHandler assertClientIsReady reconnect error:',
-          error,
-        );
-        throw new RedisNotReadyError(
-          'RedisCacheComponentsHandler: Redis client could not reconnect.',
-        );
-      });
-    }
-    await waitForTags();
+    await waitForReadiness(
+      (timeoutMs) =>
+        SyncedMap.waitUntilAllReady([this.revalidatedTagsMap], timeoutMs),
+      readyTimeoutMs,
+    );
   }
 
   private isClientUnavailable(): boolean {
