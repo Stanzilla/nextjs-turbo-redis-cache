@@ -1,0 +1,47 @@
+name: Setup Redis
+description: >-
+  Start Redis on localhost, install redis-cli, wait until Redis answers and
+  enable the keyspace notifications that the cache handler needs.
+
+inputs:
+  redis-version:
+    description: Redis version for the Redis container.
+    required: false
+    default: '7'
+  redis-port:
+    description: Host port for Redis.
+    required: false
+    default: '6379'
+
+runs:
+  using: composite
+  steps:
+    - name: Start Redis
+      uses: supercharge/redis-github-action@1.8.0
+      with:
+        redis-version: ${{ inputs.redis-version }}
+        redis-port: ${{ inputs.redis-port }}
+
+    - name: Install redis-cli
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y redis-tools
+
+    - name: Wait for Redis
+      shell: bash
+      env:
+        REDIS_PORT: ${{ inputs.redis-port }}
+      run: |
+        for _ in $(seq 1 30); do
+          if [ "$(redis-cli -p "$REDIS_PORT" ping 2>/dev/null)" = "PONG" ]; then
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "Redis did not answer PING on port $REDIS_PORT within 30 s" >&2
+        exit 1
+
+    - name: Configure Redis Keyspace Notifications
+      shell: bash
+      env:
+        REDIS_PORT: ${{ inputs.redis-port }}
+      run: redis-cli -p "$REDIS_PORT" config set notify-keyspace-events Exe
