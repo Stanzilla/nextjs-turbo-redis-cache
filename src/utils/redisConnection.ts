@@ -37,3 +37,11 @@ export function redisErrorHandler<T extends Promise<unknown>>(
     throw error;
   }) as T;
 }
+
+/** The client cannot send commands now. This is a cache miss, not a failure. */
+export class RedisNotReadyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RedisNotReadyError';
+  }
+}
