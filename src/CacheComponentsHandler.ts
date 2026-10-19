@@ -11,7 +11,11 @@ import {
   redisErrorHandler,
   shouldDeferRedisConnection,
 } from './utils/redisConnection';
-import { ErrorBudget, disconnectAndExit } from './utils/errorBudget';
+import {
+  ErrorBudget,
+  closeClient,
+  disconnectAndExit,
+} from './utils/errorBudget';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { compareAndUnlink } from './utils/compareAndUnlink';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
@@ -106,8 +110,13 @@ function decodeValue(base64: string): ReadableStream<Uint8Array> {
   });
 }
 
+// The caller creates a new handler after a constructor failure, so these
+// failures need one count across instances.
+let constructorErrorBudget: ErrorBudget | undefined;
+
 class RedisCacheComponentsHandler implements CacheComponentsHandler {
-  private client: Client;
+  // Not set when createClient() throws in the constructor.
+  private client!: Client;
   private errorBudget: ErrorBudget;
   private revalidatedTagsMap: SyncedMap<TagManifestEntry | number>;
   private inMemoryDeduplicationCache: SyncedMap<Promise<string | null>>;
@@ -248,6 +257,15 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         this.redisDeduplicationHandler.deduplicatedFunction;
     } catch (error) {
       console.error('RedisCacheComponentsHandler constructor error', error);
+      closeClient(this.client);
+      constructorErrorBudget ??= new ErrorBudget(
+        killContainerOnErrorThreshold,
+        () => disconnectAndExit(undefined),
+      );
+      constructorErrorBudget.record(
+        error,
+        'RedisCacheComponentsHandler constructor',
+      );
       throw error;
     }
   }
