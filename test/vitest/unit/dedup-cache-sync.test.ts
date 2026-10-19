@@ -248,3 +248,71 @@ describe('in-memory read cache across instances', () => {
     expect(await readHtml(reader)).toBeNull();
   });
 });
+
+describe('Cache Components in-memory read cache across instances', () => {
+  beforeEach(() => {
+    hoisted.store.clear();
+    hoisted.subscribers.clear();
+    hoisted.published.length = 0;
+    hoisted.control.failSet = false;
+  });
+
+  async function createCacheComponentsInstance(redisGetDeduplication = true) {
+    vi.resetModules();
+    const { getRedisCacheComponentsHandler } = await import(
+      '../../../src/CacheComponentsHandler'
+    );
+    return getRedisCacheComponentsHandler({
+      redisUrl: 'redis://localhost:6379',
+      keyPrefix: 'test:',
+      database: 0,
+      redisGetDeduplication,
+      inMemoryCachingTime: 10_000,
+    });
+  }
+
+  type Handler = Awaited<ReturnType<typeof createCacheComponentsInstance>>;
+
+  function write(handler: Handler, text: string) {
+    return handler.set(
+      KEY,
+      Promise.resolve({
+        value: new Blob([text]).stream(),
+        tags: [],
+        stale: 60,
+        timestamp: Date.now(),
+        expire: 600,
+        revalidate: 60,
+      }),
+    );
+  }
+
+  async function read(handler: Handler) {
+    const entry = await handler.get(KEY, []);
+    return entry ? new Response(entry.value).text() : null;
+  }
+
+  it.each([true, false])(
+    'serves the new value on another instance right after set() (writer cache %s)',
+    async (writerDeduplication) => {
+      const writer = await createCacheComponentsInstance(writerDeduplication);
+      const reader = await createCacheComponentsInstance();
+
+      await write(writer, 'v1');
+      expect(await read(reader)).toBe('v1');
+
+      await write(writer, 'v2');
+      expect(await read(reader)).toBe('v2');
+    },
+  );
+
+  it('drops a cached miss on another instance after set()', async () => {
+    const writer = await createCacheComponentsInstance();
+    const reader = await createCacheComponentsInstance();
+    expect(await read(reader)).toBeNull();
+
+    await write(writer, 'v1');
+
+    expect(await read(reader)).toBe('v1');
+  });
+});
