@@ -60,7 +60,7 @@ async function createMap(client: ReloadClient) {
     database: 0,
     querySize: 50,
     filterKeys: () => true,
-    customizedSync: { withoutOrphanCleanup: true },
+    customizedSync: { fieldsAreNotRedisKeys: true },
   });
   await map.waitUntilReady();
   return map;

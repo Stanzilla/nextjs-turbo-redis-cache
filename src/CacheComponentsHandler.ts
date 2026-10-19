@@ -188,7 +188,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         database,
         querySize: revalidateTagQuerySize,
         filterKeys,
-        customizedSync: { withoutOrphanCleanup: true },
+        customizedSync: { fieldsAreNotRedisKeys: true },
         resyncIntervalMs:
           avgResyncIntervalMs +
           avgResyncIntervalMs / 10 +

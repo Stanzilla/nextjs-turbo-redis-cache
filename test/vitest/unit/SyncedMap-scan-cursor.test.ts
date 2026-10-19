@@ -193,7 +193,7 @@ describe('SyncedMap SCAN/HSCAN cursor precision (issue #97)', () => {
         database: 0,
         querySize: 250,
         filterKeys: () => true,
-        customizedSync: { withoutOrphanCleanup: true },
+        customizedSync: { fieldsAreNotRedisKeys: true },
       });
 
       await expectCompletesWithin(map.waitUntilReady(), 1000);
@@ -211,7 +211,7 @@ describe('SyncedMap SCAN/HSCAN cursor precision (issue #97)', () => {
         database: 0,
         querySize: 250,
         filterKeys: () => true,
-        customizedSync: { withoutOrphanCleanup: true },
+        customizedSync: { fieldsAreNotRedisKeys: true },
       });
 
       await expectCompletesWithin(map.waitUntilReady(), 1000);
@@ -233,7 +233,7 @@ describe('SyncedMap SCAN/HSCAN cursor precision (issue #97)', () => {
         database: 0,
         querySize: 250,
         filterKeys: () => true,
-        customizedSync: { withoutOrphanCleanup: true },
+        customizedSync: { fieldsAreNotRedisKeys: true },
       });
 
       const sharedTagsMap = new SyncedMap<string[]>({
@@ -286,7 +286,7 @@ describe('SyncedMap SCAN/HSCAN cursor precision (issue #97)', () => {
         database: 0,
         querySize: 250,
         filterKeys: () => true,
-        customizedSync: { withoutOrphanCleanup: true },
+        customizedSync: { fieldsAreNotRedisKeys: true },
       });
 
       await expectCompletesWithin(map.waitUntilReady(), 1000);
