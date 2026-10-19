@@ -215,4 +215,5 @@ lint-and-unit                        → Lint + Unit Tests + Coverage
 | `PLAYWRIGHT_BASE_URL`   | E2E                            | Override base URL (skips `webServer` auto-start)                          |
 | `SKIP_BUILD`            | Integration                    | Skip Next.js build if app is pre-built                                    |
 | `DEBUG_INTEGRATION`     | Integration                    | Print child process stdout/stderr                                         |
+| `KEEP_SERVER_RUNNING`   | Integration                    | Keep the Next.js server(s) up after the run; the next run stops them      |
 | `CACHE_COMPONENTS_PORT` | Integration (cache-components) | Port for the server (default: 3065)                                       |

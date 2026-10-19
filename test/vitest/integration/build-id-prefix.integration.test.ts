@@ -1,28 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import { createClient, RedisClientType } from 'redis';
 import path from 'path';
 import fs from 'fs';
 import fetch from 'node-fetch';
+import { NextFixture, startNextFixture } from './next-fixture';
 
 const NEXT_APP = 'next-app-15-4-11';
 const PORT = 3075;
 const BASE_URL = `http://localhost:${PORT}`;
 
-async function waitForServer(url: string, timeout = 20000) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    try {
-      const res = await fetch(url + '/api/cached-static-fetch');
-      if (res.ok) return;
-    } catch {}
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  throw new Error('Next.js server did not start in time');
-}
-
 describe('BUILD_ID-based key prefix (Next handlers)', () => {
-  let nextProcess: ChildProcessWithoutNullStreams | undefined;
+  let nextFixture: NextFixture | undefined;
   let redis: RedisClientType;
   let appDir: string;
   let buildId: string;
@@ -37,38 +25,18 @@ describe('BUILD_ID-based key prefix (Next handlers)', () => {
     process.env.REDISHOST = process.env.REDISHOST || 'localhost';
     process.env.REDISPORT = process.env.REDISPORT || '6379';
 
-    // Install + build
-    await new Promise<void>((resolve, reject) => {
-      const p = spawn('pnpm', ['install'], { cwd: appDir, stdio: 'inherit' });
-      p.on('close', (code) =>
-        code === 0 ? resolve() : reject(new Error('pnpm i failed')),
-      );
-    });
-    await new Promise<void>((resolve, reject) => {
-      const p = spawn('pnpm', ['build'], { cwd: appDir, stdio: 'inherit' });
-      p.on('close', (code) =>
-        code === 0 ? resolve() : reject(new Error('pnpm build failed')),
-      );
+    // Start server without KEY_PREFIX/VERCEL_URL
+    nextFixture = await startNextFixture({
+      appDir,
+      ports: [PORT],
+      env: { SKIP_KEYSPACE_CONFIG_CHECK: 'true' },
+      readyPath: '/api/cached-static-fetch',
     });
 
     // Read BUILD_ID from the built app
     buildId = fs
       .readFileSync(path.join(appDir, '.next', 'BUILD_ID'), 'utf8')
       .trim();
-
-    // Start server without KEY_PREFIX/VERCEL_URL
-    nextProcess = spawn('npx', ['next', 'start', '-p', String(PORT)], {
-      cwd: appDir,
-      env: { ...process.env, SKIP_KEYSPACE_CONFIG_CHECK: 'true' },
-      stdio: 'pipe',
-    });
-
-    nextProcess.stderr?.on(
-      'data',
-      (d) => process.env.DEBUG_INTEGRATION && console.error(String(d)),
-    );
-
-    await waitForServer(BASE_URL);
 
     // Connect Redis
     redis = createClient({
@@ -81,7 +49,7 @@ describe('BUILD_ID-based key prefix (Next handlers)', () => {
     try {
       if (redis) await redis.quit();
     } finally {
-      if (nextProcess) nextProcess.kill();
+      await nextFixture?.stop();
     }
   });
 

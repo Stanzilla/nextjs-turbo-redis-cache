@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawn, ChildProcess } from 'child_process';
 import { createClient, RedisClientType } from 'redis';
 import path from 'path';
+import { NextFixture, startNextFixture } from '../next-fixture';
 
 const PORT = Number(process.env.CACHE_COMPONENTS_PORT || '3065');
 const BASE_URL = `http://localhost:${PORT}`;
 
 describe('Next.js 16 Cache Components Integration', () => {
-  let nextProcess: ChildProcess;
+  let nextFixture: NextFixture | undefined;
   let redisClient: RedisClientType;
   let keyPrefix: string;
 
@@ -54,40 +54,13 @@ describe('Next.js 16 Cache Components Integration', () => {
       cacheComponentsApp,
     );
 
-    console.log('Installing Next.js app dependencies...');
-    await new Promise<void>((resolve, reject) => {
-      const installProcess = spawn('pnpm', ['install'], {
-        cwd: appDir,
-        stdio: 'inherit',
-      });
-
-      installProcess.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Install failed with code ${code}`));
-      });
+    nextFixture = await startNextFixture({
+      appDir,
+      ports: [PORT],
+      env: { VERCEL_URL: keyPrefix },
+      // A static file, so the readiness check does not touch the cache.
+      readyPath: '/favicon.ico',
     });
-
-    console.log('Building Next.js app...');
-    await new Promise<void>((resolve, reject) => {
-      const buildProcess = spawn('pnpm', ['build'], {
-        cwd: appDir,
-        stdio: 'inherit',
-      });
-
-      buildProcess.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Build failed with code ${code}`));
-      });
-    });
-
-    console.log('Starting Next.js app...');
-    nextProcess = spawn('pnpm', ['start', '-p', PORT.toString()], {
-      cwd: appDir,
-      env: { ...process.env, VERCEL_URL: keyPrefix },
-    });
-
-    // Wait for server to be ready
-    await new Promise((resolve) => setTimeout(resolve, 3000));
   }, 120000);
 
   afterAll(async () => {
@@ -98,10 +71,7 @@ describe('Next.js 16 Cache Components Integration', () => {
     }
     await redisClient.quit();
 
-    // Kill Next.js process
-    if (nextProcess) {
-      nextProcess.kill();
-    }
+    await nextFixture?.stop();
   });
 
   describe('Basic use cache functionality', () => {
