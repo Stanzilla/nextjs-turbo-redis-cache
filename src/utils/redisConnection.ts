@@ -45,3 +45,20 @@ export class RedisNotReadyError extends Error {
     this.name = 'RedisNotReadyError';
   }
 }
+
+/**
+ * Waits for setup with the budget of the calling cache operation. A cache
+ * call must not wait longer than its own Redis timeout before it misses.
+ */
+export async function waitForReadiness(
+  wait: (timeoutMs: number) => Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  try {
+    await wait(timeoutMs);
+  } catch (error) {
+    throw new RedisNotReadyError(
+      `Redis cache is not ready: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
