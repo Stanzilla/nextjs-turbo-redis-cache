@@ -64,6 +64,8 @@ export class SyncedMap<V> {
   private reloadNeeded = false;
   private resyncTimer?: ReturnType<typeof setInterval>;
   private closed = false;
+  // Retry delays that close() must end.
+  private retryWaits = new Set<() => void>();
 
   constructor(options: SyncedMapOptions) {
     this.client = options.client;
@@ -164,7 +166,15 @@ export class SyncedMap<V> {
           `${label} attempt ${attempt + 1} failed, retrying in ${delay}ms`,
           error,
         );
-        await new Promise((r) => setTimeout(r, delay));
+        await new Promise<void>((resolve) => {
+          const wake = () => {
+            clearTimeout(timer);
+            this.retryWaits.delete(wake);
+            resolve();
+          };
+          const timer = setTimeout(wake, delay);
+          this.retryWaits.add(wake);
+        });
       }
     }
   }
@@ -267,13 +277,14 @@ export class SyncedMap<V> {
   }
 
   /**
-   * Stops the periodic resync and the subscriber. Running setup retries stop
-   * at their next attempt. The shared main client stays open.
+   * Stops the periodic resync, the subscriber and the pending setup retries.
+   * The shared main client stays open.
    */
   public async close(): Promise<void> {
     this.closed = true;
     clearInterval(this.resyncTimer);
     this.resyncTimer = undefined;
+    for (const wake of this.retryWaits) wake();
     const subscriber = this.subscriberClient;
     this.subscriberClient = undefined;
     await this.disconnectSubscriber(subscriber);
