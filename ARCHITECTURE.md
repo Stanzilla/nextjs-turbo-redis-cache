@@ -202,7 +202,7 @@ The `inMemoryDeduplicationCache` itself is a `SyncedMap` configured with `withou
 
 ```typescript
 get(key: string, ctx: {
-  kind: 'APP_ROUTE' | 'APP_PAGE' | 'FETCH';
+  kind: 'APP_ROUTE' | 'APP_PAGE' | 'PAGES' | 'FETCH';
   tags?: string[];         // explicit tags (FETCH only)
   softTags?: string[];     // implicit tags like _N_T_/path (FETCH only)
   revalidate?: number;     // FETCH only
@@ -267,9 +267,11 @@ flowchart TD
 
 ```typescript
 set(key: string, data: {
-  kind: 'APP_PAGE' | 'APP_ROUTE' | 'FETCH';
+  kind: 'APP_PAGE' | 'APP_ROUTE' | 'PAGES' | 'REDIRECT' | 'FETCH';
   // APP_PAGE: { html, rscData, headers: { 'x-next-cache-tags', 'x-nextjs-stale-time' } }
   // APP_ROUTE: { body, status, headers: { 'x-next-cache-tags', 'cache-control' } }
+  // PAGES: { html, pageData, headers, status }
+  // REDIRECT: { props }
   // FETCH: { data: { headers, body, status, url }, revalidate }
 }, ctx: {
   tags?: string[];
@@ -428,7 +430,7 @@ Older package versions stored a number and compared it numerically. Immediate ha
 | Aspect                    | RedisStringsHandler                                                                                              | CacheComponentsHandler                                                                                                                                      |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Next.js version**       | 15+ (legacy `cacheHandler`)                                                                                      | 16+ (`cacheHandlers.default`)                                                                                                                               |
-| **Cache kinds**           | `APP_PAGE`, `APP_ROUTE`, `FETCH`                                                                                 | Unified (all via `'use cache'`, `cacheTag`, `cacheLife`)                                                                                                    |
+| **Cache kinds**           | `APP_PAGE`, `APP_ROUTE`, `PAGES`, `REDIRECT` (set only), `FETCH`                                                 | Unified (all via `'use cache'`, `cacheTag`, `cacheLife`)                                                                                                    |
 | **Value format**          | Arbitrary JSON (page HTML, RSC data, fetch response)                                                             | `ReadableStream<Uint8Array>` ↔ base64 string                                                                                                               |
 | **Entry shape**           | `{ value, lastModified, tags }`                                                                                  | `{ value, tags, stale, timestamp, expire, revalidate }`                                                                                                     |
 | **set() receives**        | Resolved data                                                                                                    | `Promise<CacheComponentsEntry>` (may not yet be resolved)                                                                                                   |
