@@ -14,6 +14,7 @@ class HashMockClient {
   afterScript?: () => Promise<void>;
   isOpen = true;
   isReady = true;
+  keyspaceConfig = 'Exe';
   /** Shared with duplicates, so a publish reaches the subscriber. */
   subscriptions = new Map<string, ((message: string) => unknown)[]>();
 
@@ -27,7 +28,7 @@ class HashMockClient {
   }
 
   async configGet() {
-    return { 'notify-keyspace-events': 'Exe' };
+    return { 'notify-keyspace-events': this.keyspaceConfig };
   }
 
   async subscribe(channel: string, listener: (message: string) => unknown) {
@@ -51,6 +52,7 @@ class HashMockClient {
   duplicate() {
     const subscriber = new HashMockClient();
     subscriber.subscriptions = this.subscriptions;
+    subscriber.keyspaceConfig = this.keyspaceConfig;
     return subscriber;
   }
 
@@ -202,7 +204,7 @@ describe('SyncedMap orphan cleanup', () => {
     expect(map.get('posts')).toBe(1);
   });
 
-  it('keeps tag-manifest fields when withoutOrphanCleanup is set', async () => {
+  it('keeps tag-manifest fields when fieldsAreNotRedisKeys is set', async () => {
     const client = new HashMockClient();
     const map = new SyncedMap<number>({
       client: client as never,
@@ -211,7 +213,7 @@ describe('SyncedMap orphan cleanup', () => {
       database: 0,
       querySize: 50,
       filterKeys: () => true,
-      customizedSync: { withoutOrphanCleanup: true },
+      customizedSync: { fieldsAreNotRedisKeys: true },
     });
     await map.waitUntilReady();
     await map.set('posts', 1);
@@ -221,5 +223,56 @@ describe('SyncedMap orphan cleanup', () => {
 
     expect(client.hDelCalls).toEqual([]);
     expect(map.get('posts')).toBe(1);
+  });
+});
+
+describe('SyncedMap keyevents', () => {
+  function createTagMap(client: HashMockClient) {
+    return new SyncedMap<number>({
+      client: client as never,
+      keyPrefix: 'app:',
+      redisKey: '__revalidated_tags__',
+      database: 0,
+      querySize: 50,
+      filterKeys: () => true,
+      customizedSync: { fieldsAreNotRedisKeys: true },
+    });
+  }
+
+  it('keeps a tag record when a cache key with the same name expires', async () => {
+    const client = new HashMockClient();
+    const map = createTagMap(client);
+    await map.waitUntilReady();
+    await map.set('posts', 1);
+
+    await client.deliver('__keyevent@0__:expired', 'app:posts');
+    await client.deliver('__keyevent@0__:evicted', 'app:posts');
+
+    expect(map.get('posts')).toBe(1);
+    expect(client.hash.get('posts')).toBe('1');
+    expect(client.hDelCalls).toEqual([]);
+    await map.close();
+  });
+
+  it('becomes ready when Redis does not publish keyevents', async () => {
+    const client = new HashMockClient();
+    client.keyspaceConfig = '';
+    const map = createTagMap(client);
+
+    await expect(map.waitUntilReady(500)).resolves.toBeUndefined();
+    await map.close();
+  });
+
+  it('still removes an expired cache key from a map keyed by cache keys', async () => {
+    const client = new HashMockClient();
+    const map = createMap(client);
+    await map.waitUntilReady();
+    await map.set('posts', 1);
+
+    await client.deliver('__keyevent@0__:expired', 'app:posts');
+
+    expect(map.get('posts')).toBeUndefined();
+    expect(client.hash.has('posts')).toBe(false);
+    await map.close();
   });
 });
