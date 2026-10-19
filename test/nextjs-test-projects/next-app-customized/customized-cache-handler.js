@@ -8,7 +8,7 @@ module.exports = class CustomizedCacheHandler {
       cachedHandler = new RedisStringsHandler({
         database: 0,
         keyPrefix: 'test',
-        timeoutMs: 2_000,
+        getTimeoutMs: 2_000,
         revalidateTagQuerySize: 500,
         sharedTagsKey: '__sharedTags__',
         avgResyncIntervalMs: 10_000 * 60,
