@@ -1,9 +1,6 @@
-import { createClient } from 'redis';
-import type { RedisClientOptions } from 'redis';
 import type { CreateRedisStringsHandlerOptions } from './RedisStringsHandler';
 import { SyncedMap } from './SyncedMap';
 import { DeduplicatedRequestHandler } from './DeduplicatedRequestHandler';
-import { debug } from './utils/debug';
 import { resolveKeyPrefix } from './utils/prefix';
 import {
   type Client,
@@ -17,6 +14,7 @@ import {
   closeClient,
   disconnectAndExit,
 } from './utils/errorBudget';
+import { createCacheClient } from './utils/cacheClient';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { compareAndUnlink } from './utils/compareAndUnlink';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
@@ -171,51 +169,15 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       this.redisGetDeduplication = redisGetDeduplication;
       this.redisConnectionDeferred = shouldDeferRedisConnection();
 
-      this.client = createClient({
-        url: redisUrl,
-        pingInterval: 10_000,
-        ...(database !== 0 ? { database } : {}),
-        ...(socketOptions
-          ? { socket: { ...socketOptions } as RedisClientOptions['socket'] }
-          : {}),
-        ...(clientOptions || {}),
+      this.client = createCacheClient({
+        label: 'RedisCacheComponentsHandler client',
+        redisUrl,
+        database,
+        socketOptions,
+        clientOptions,
+        errorBudget: this.errorBudget,
+        deferConnection: this.redisConnectionDeferred,
       });
-
-      this.client.on('ready', () => this.errorBudget.reset());
-      this.client.on('error', (error) => {
-        console.error('RedisCacheComponentsHandler client error', error);
-        setTimeout(() => {
-          // node-redis throws "Socket already opened" if connect() is called while a socket is already open.
-          // When we get an error while isOpen=true (but isReady=false), we should *not* force an extra connect.
-          if (this.client.isOpen) return;
-
-          this.client.connect().catch((err) => {
-            console.error(
-              'Failed to reconnect RedisCacheComponentsHandler client after connection loss:',
-              err,
-            );
-          });
-        }, 1000);
-        this.errorBudget.record(error, 'RedisCacheComponentsHandler client');
-      });
-
-      if (!this.redisConnectionDeferred) {
-        this.client
-          .connect()
-          .then(() => {
-            debug('green', 'RedisCacheComponentsHandler client connected.');
-          })
-          .catch(() => {
-            this.client.connect().catch((error) => {
-              console.error(
-                'Failed to connect RedisCacheComponentsHandler client:',
-                error,
-              );
-              this.client.disconnect();
-              throw error;
-            });
-          });
-      }
 
       const filterKeys = (key: string): boolean =>
         key !== REVALIDATED_TAGS_KEY && key !== LEGACY_SHARED_TAGS_KEY;
