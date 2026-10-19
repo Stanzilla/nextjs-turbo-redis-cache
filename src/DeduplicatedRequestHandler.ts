@@ -18,93 +18,88 @@ export class DeduplicatedRequestHandler<
     this.inMemoryDeduplicationCache = inMemoryDeduplicationCache;
   }
 
-  // Method to manually seed a result into the cache
-  seedRequestReturn(key: string, value: K): void {
-    const resultPromise = new Promise<K>((res) => res(value));
-    this.inMemoryDeduplicationCache.set(key, resultPromise);
+  /**
+   * Put a known result into the cache, for example the value that set() is
+   * writing. It expires `cachingTimeMs` after now. Returns the cached promise,
+   * so that the caller can {@link forget} exactly this entry later.
+   */
+  seedRequestReturn(key: string, value: K): Promise<K> {
+    const resultPromise = Promise.resolve(value);
+    void this.inMemoryDeduplicationCache.set(key, resultPromise);
 
     debugVerbose(
       'DeduplicatedRequestHandler.seedRequestReturn() seeded result ',
       key,
-      (value as string).substring(0, 200),
+      String(value).substring(0, 200),
     );
 
+    this.expireLater(key, resultPromise);
+    return resultPromise;
+  }
+
+  /**
+   * Remove the entry for `key` only while it is still `promise`. A newer
+   * entry for the same key stays. The removal is local to this instance.
+   */
+  forget(key: string, promise: Promise<K>): void {
+    if (this.inMemoryDeduplicationCache.get(key) === promise) {
+      void this.inMemoryDeduplicationCache.delete(key, true);
+    }
+  }
+
+  // Each instance runs its own timer, so the expiry is local and does not
+  // publish a sync message.
+  private expireLater(key: string, promise: Promise<K>): void {
     setTimeout(() => {
-      this.inMemoryDeduplicationCache.delete(key, true);
+      debugVerbose(
+        'DeduplicatedRequestHandler expiring key from inMemoryDeduplicationCache after',
+        key,
+        this.cachingTimeMs,
+        'ms',
+      );
+      this.forget(key, promise);
     }, this.cachingTimeMs);
   }
 
-  // Method to handle deduplicated requests
+  /**
+   * Returns a function that shares one pending or recent result per key. A
+   * fetched result expires `cachingTimeMs` after it settles. A rejected
+   * request is removed at once, so the next caller tries again instead of
+   * getting the same error replayed.
+   *
+   * Callers get the cached promise itself, not a copy. Both handlers cache
+   * strings, which are immutable.
+   */
   deduplicatedFunction = (key: string): T => {
     debugVerbose(
       'DeduplicatedRequestHandler.deduplicatedFunction() called with',
       key,
     );
-    //eslint-disable-next-line @typescript-eslint/no-this-alias
-    const self = this;
-    const dedupedFn = async (...args: [never, never]): Promise<K> => {
-      // If there's already a pending request with the same key, return it
-      debugVerbose(
-        'DeduplicatedRequestHandler.deduplicatedFunction().dedupedFn called with',
-        key,
-      );
-      if (
-        self.inMemoryDeduplicationCache &&
-        self.inMemoryDeduplicationCache.has(key)
-      ) {
+    const dedupedFn = (...args: [never, never]): Promise<K> => {
+      const cached = this.inMemoryDeduplicationCache.get(key);
+      if (cached) {
         debugVerbose(
           'DeduplicatedRequestHandler.deduplicatedFunction().dedupedFn ',
           key,
           'found key in inMemoryDeduplicationCache',
         );
-        const res = await self.inMemoryDeduplicationCache
-          .get(key)!
-          .then((v) => structuredClone(v));
-        debugVerbose(
-          'DeduplicatedRequestHandler.deduplicatedFunction().dedupedFn ',
-          key,
-          'found key in inMemoryDeduplicationCache and served result from there',
-          JSON.stringify(res).substring(0, 200),
-        );
-        return res;
+        return cached;
       }
 
-      // If no pending request, call the original function and store the promise
-      const promise = self.fn(...args);
-      self.inMemoryDeduplicationCache.set(key, promise);
+      const promise = this.fn(...args);
+      void this.inMemoryDeduplicationCache.set(key, promise);
 
       debugVerbose(
         'DeduplicatedRequestHandler.deduplicatedFunction().dedupedFn ',
         key,
-        'did not found key in inMemoryDeduplicationCache. Setting it now and waiting for promise to resolve',
+        'did not find key in inMemoryDeduplicationCache. Fetching it now',
       );
 
-      try {
-        const ts = performance.now();
-        const result = await promise;
-        debugVerbose(
-          'DeduplicatedRequestHandler.deduplicatedFunction().dedupedFn ',
-          key,
-          'promise resolved (in ',
-          performance.now() - ts,
-          'ms). Returning result',
-          JSON.stringify(result).substring(0, 200),
-        );
-        return structuredClone(result);
-      } finally {
-        // Once the promise is resolved/rejected and caching timeout is over, remove it from the map.
-        // Each instance runs its own timer, so the expiry is local and does not publish a sync message.
-        setTimeout(() => {
-          debugVerbose(
-            'DeduplicatedRequestHandler.deduplicatedFunction().dedupedFn ',
-            key,
-            'deleting key from inMemoryDeduplicationCache after ',
-            self.cachingTimeMs,
-            'ms',
-          );
-          self.inMemoryDeduplicationCache.delete(key, true);
-        }, self.cachingTimeMs);
-      }
+      promise.then(
+        () => this.expireLater(key, promise),
+        () => this.forget(key, promise),
+      );
+      return promise;
     };
     return dedupedFn as T;
   };
