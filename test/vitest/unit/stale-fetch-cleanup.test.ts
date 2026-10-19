@@ -84,6 +84,28 @@ describe('RedisStringsHandler stale FETCH reads', () => {
     expect(entry?.value).toMatchObject({ data: { body: 'new' } });
   });
 
+  it('a replacement written during the stale cleanup keeps its tag membership', async () => {
+    const taggedCtx = { ...setCtx, tags: ['posts'] };
+    await handler.set('fetch-e', fetchValue('old'), taggedCtx);
+    await tick();
+    await handler.revalidateTag(PAGE_TAG);
+    server.pause(['EVAL', 'UNLINK']);
+
+    expect(await handler.get('fetch-e', fetchCtx('fetch-e'))).toBeNull();
+    await tick();
+    await otherInstance.set('fetch-e', fetchValue('new'), taggedCtx);
+    server.resume();
+    await tick(20);
+    const sharedTags = (
+      handler as unknown as { sharedTagsMap: Map<string, string[]> }
+    ).sharedTagsMap;
+    expect(sharedTags.get('fetch-e')).toEqual(['posts']);
+
+    await handler.revalidateTag('posts');
+    await tick(20);
+    expect(server.store.has('stale:fetch-e')).toBe(false);
+  });
+
   it('removes a stale entry that nobody replaced', async () => {
     await handler.set('fetch-d', fetchValue('d'), setCtx);
     await tick();
