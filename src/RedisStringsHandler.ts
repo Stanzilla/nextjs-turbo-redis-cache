@@ -6,9 +6,11 @@ import { CacheValueSerializer, jsonCacheValueSerializer } from './serializer';
 import { resolveCacheEntryTtlSeconds } from './utils/cacheTtl';
 import {
   type Client,
+  RedisNotReadyError,
   redisErrorHandler,
   shouldDeferRedisConnection,
 } from './utils/redisConnection';
+import { ErrorBudget, disconnectAndExit } from './utils/errorBudget';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
 import { compareAndUnlink } from './utils/compareAndUnlink';
@@ -254,7 +256,6 @@ const SUPPORTED_SET_KINDS = [
   'FETCH',
 ] as const;
 
-let killContainerOnErrorCount: number = 0;
 export default class RedisStringsHandler {
   private client: Client;
   private sharedTagsMap: SyncedMap<string[]>;
@@ -273,7 +274,7 @@ export default class RedisStringsHandler {
   private inMemoryCachingTime: number;
   private defaultStaleAge: number;
   private estimateExpireAge: (staleAge: number) => number;
-  private killContainerOnErrorThreshold: number;
+  private errorBudget: ErrorBudget;
   private valueSerializer: CacheValueSerializer;
   private redisConnectionDeferred: boolean;
 
@@ -307,13 +308,15 @@ export default class RedisStringsHandler {
     clientOptions,
     valueSerializer = jsonCacheValueSerializer,
   }: CreateRedisStringsHandlerOptions) {
+    this.errorBudget = new ErrorBudget(killContainerOnErrorThreshold, () =>
+      disconnectAndExit(this.client),
+    );
     try {
       this.keyPrefix = keyPrefix;
       this.redisGetDeduplication = redisGetDeduplication;
       this.inMemoryCachingTime = inMemoryCachingTime;
       this.defaultStaleAge = defaultStaleAge;
       this.estimateExpireAge = estimateExpireAge;
-      this.killContainerOnErrorThreshold = killContainerOnErrorThreshold;
       this.getTimeoutMs = getTimeoutMs;
       this.writeTimeoutMs = writeTimeoutMs;
       this.valueSerializer = valueSerializer;
@@ -329,12 +332,9 @@ export default class RedisStringsHandler {
           ...(clientOptions || {}),
         });
 
+        this.client.on('ready', () => this.errorBudget.reset());
         this.client.on('error', (error) => {
-          console.error(
-            'Redis client error',
-            error,
-            killContainerOnErrorCount++,
-          );
+          console.error('Redis client error', error);
           setTimeout(() => {
             // Avoid overlapping connect() calls which can lead to
             // "Socket already opened" errors when a reconnect is already
@@ -348,21 +348,7 @@ export default class RedisStringsHandler {
               });
             }
           }, 1000);
-          if (
-            this.killContainerOnErrorThreshold > 0 &&
-            killContainerOnErrorCount >= this.killContainerOnErrorThreshold
-          ) {
-            console.error(
-              'Redis client error threshold reached, disconnecting and exiting (please implement a restart process/container watchdog to handle this error)',
-              error,
-              killContainerOnErrorCount++,
-            );
-            this.client.disconnect();
-            this.client.quit();
-            setTimeout(() => {
-              process.exit(1);
-            }, 500);
-          }
+          this.errorBudget.record(error, 'Redis client');
         });
 
         if (!this.redisConnectionDeferred) {
@@ -434,22 +420,8 @@ export default class RedisStringsHandler {
       this.deduplicatedRedisGet =
         this.redisDeduplicationHandler.deduplicatedFunction;
     } catch (error) {
-      console.error(
-        'RedisStringsHandler constructor error',
-        error,
-        killContainerOnErrorCount++,
-      );
-      if (
-        killContainerOnErrorThreshold > 0 &&
-        killContainerOnErrorCount >= killContainerOnErrorThreshold
-      ) {
-        console.error(
-          'RedisStringsHandler constructor error threshold reached, disconnecting and exiting (please implement a restart process/container watchdog to handle this error)',
-          error,
-          killContainerOnErrorCount++,
-        );
-        process.exit(1);
-      }
+      console.error('RedisStringsHandler constructor error', error);
+      this.errorBudget.record(error, 'RedisStringsHandler constructor');
       throw error;
     }
   }
@@ -473,7 +445,7 @@ export default class RedisStringsHandler {
       if (this.redisConnectionDeferred) {
         return;
       }
-      throw new Error(
+      throw new RedisNotReadyError(
         'assertClientIsReady: Redis client is not ready yet or connection is lost.',
       );
     }
@@ -546,7 +518,7 @@ export default class RedisStringsHandler {
         // as a cache miss rather than a hard error - this matches the
         // null-from-deserialize semantics in the CacheValueSerializer contract
         // and prevents a single unreadable entry from incrementing
-        // killContainerOnErrorCount on every read.
+        // the error budget on every read.
         console.warn(
           'RedisStringsHandler.get() valueSerializer.deserialize failed, treating as cache miss',
           this.keyPrefix + key,
@@ -682,24 +654,8 @@ export default class RedisStringsHandler {
       console.error(
         'RedisStringsHandler.get() Error occurred while getting cache entry. Returning null so site can continue to serve content while cache is disabled. The original error was:',
         error,
-        killContainerOnErrorCount++,
       );
-
-      if (
-        this.killContainerOnErrorThreshold > 0 &&
-        killContainerOnErrorCount >= this.killContainerOnErrorThreshold
-      ) {
-        console.error(
-          'RedisStringsHandler get() error threshold reached, disconnecting and exiting (please implement a restart process/container watchdog to handle this error)',
-          error,
-          killContainerOnErrorCount,
-        );
-        this.client.disconnect();
-        this.client.quit();
-        setTimeout(() => {
-          process.exit(1);
-        }, 500);
-      }
+      this.errorBudget.record(error, 'RedisStringsHandler.get()');
       return null;
     }
   }
@@ -847,23 +803,8 @@ export default class RedisStringsHandler {
       console.error(
         'RedisStringsHandler.set() Error occurred while setting cache entry. The original error was:',
         error,
-        killContainerOnErrorCount++,
       );
-      if (
-        this.killContainerOnErrorThreshold > 0 &&
-        killContainerOnErrorCount >= this.killContainerOnErrorThreshold
-      ) {
-        console.error(
-          'RedisStringsHandler set() error threshold reached, disconnecting and exiting (please implement a restart process/container watchdog to handle this error)',
-          error,
-          killContainerOnErrorCount,
-        );
-        this.client.disconnect();
-        this.client.quit();
-        setTimeout(() => {
-          process.exit(1);
-        }, 500);
-      }
+      this.errorBudget.record(error, 'RedisStringsHandler.set()');
       throw error;
     }
   }
@@ -972,23 +913,8 @@ export default class RedisStringsHandler {
       console.error(
         'RedisStringsHandler.revalidateTag() Error occurred while revalidating tags. The original error was:',
         error,
-        killContainerOnErrorCount++,
       );
-      if (
-        this.killContainerOnErrorThreshold > 0 &&
-        killContainerOnErrorCount >= this.killContainerOnErrorThreshold
-      ) {
-        console.error(
-          'RedisStringsHandler revalidateTag() error threshold reached, disconnecting and exiting (please implement a restart process/container watchdog to handle this error)',
-          error,
-          killContainerOnErrorCount,
-        );
-        this.client.disconnect();
-        this.client.quit();
-        setTimeout(() => {
-          process.exit(1);
-        }, 500);
-      }
+      this.errorBudget.record(error, 'RedisStringsHandler.revalidateTag()');
       throw error;
     }
   }
