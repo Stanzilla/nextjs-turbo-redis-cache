@@ -411,7 +411,7 @@ Returning `undefined` when both `cacheControl.expire` and `revalidate` are absen
 
 **Tag-manifest keys vs `SyncedMap` orphan cleanup**
 
-`cleanupKeysNotInRedis()` SCANs Redis string keys and HDELs hash fields whose names are missing from that set. That is correct for `sharedTagsMap` (cache key → tags). It is wrong for `revalidatedTagsMap` (tag name → `{ stale, expired }`): tag names are never top-level keys, so startup or the hourly resync would wipe every invalidation and publish the delete fleet-wide. Tag-manifest maps set `customizedSync.withoutOrphanCleanup`.
+`cleanupKeysNotInRedis()` runs one Lua script for each batch of map keys. The script HDELs each hash field whose cache key does not exist, in the same step as the check. That is correct for `sharedTagsMap` (cache key → tags). It is wrong for `revalidatedTagsMap` (tag name → `{ stale, expired }`): tag names are never top-level keys, so startup or the hourly resync would wipe every invalidation and publish the delete fleet-wide. Tag-manifest maps set `customizedSync.withoutOrphanCleanup`.
 
 **Dedup cache vs Redis UNLINK**
 

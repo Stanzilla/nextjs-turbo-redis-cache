@@ -747,9 +747,9 @@ export default class RedisStringsHandler {
         return;
       }
 
+      const tags = [...(ctx.tags || [])];
       if (data?.kind === 'APP_PAGE' || data?.kind === 'APP_ROUTE') {
-        const tags = data.headers['x-next-cache-tags']?.split(',');
-        ctx.tags = [...(ctx.tags || []), ...(tags || [])];
+        tags.push(...(data.headers['x-next-cache-tags']?.split(',') || []));
       }
 
       // Pages Router entries (PAGES, REDIRECT and null/notFound results) do not
@@ -758,15 +758,13 @@ export default class RedisStringsHandler {
       // invalidates them the same way as App Router entries.
       if (data === null || data.kind === 'PAGES' || data.kind === 'REDIRECT') {
         const implicitTag = NEXT_CACHE_IMPLICIT_TAG_ID + getRoutePath(key);
-        if (!ctx.tags?.includes(implicitTag)) {
-          ctx.tags = [...(ctx.tags || []), implicitTag];
-        }
+        if (!tags.includes(implicitTag)) tags.push(implicitTag);
       }
 
       // Constructing and serializing the value for storing it in redis
       const cacheEntry: CacheEntry = {
         lastModified: Date.now(),
-        tags: ctx?.tags || [],
+        tags,
         value: data,
         cacheControl: ctx.cacheControl,
       };
@@ -824,28 +822,20 @@ export default class RedisStringsHandler {
         expireAt,
       );
 
-      // Setting the tags for the cache entry in the sharedTagsMap (locally stored hashmap synced via redis)
-      let setTagsOperation: Promise<void> | undefined;
-      if (ctx.tags && ctx.tags.length > 0) {
-        const currentTags = this.sharedTagsMap.get(key);
-        const currentIsSameAsNew =
-          currentTags?.length === ctx.tags.length &&
-          currentTags.every((v) => ctx.tags!.includes(v)) &&
-          ctx.tags.every((v) => currentTags.includes(v));
-
-        if (!currentIsSameAsNew) {
-          setTagsOperation = this.sharedTagsMap.set(
-            key,
-            structuredClone(ctx.tags) as string[],
-          );
-        }
-      }
+      // Write the tag membership after every successful SET, also when the
+      // tags did not change. The orphan cleanup of another instance can remove
+      // the field between a SET and this write, so each write heals it. An
+      // untagged entry removes the membership of the entry it replaces.
+      const setTagsOperation = setOperation.then(() => {
+        if (tags.length > 0) return this.sharedTagsMap.set(key, tags);
+        if (this.sharedTagsMap.has(key)) return this.sharedTagsMap.delete(key);
+      });
 
       debug(
         'blue',
         'RedisStringsHandler.set() will set the following sharedTagsMap',
         key,
-        ctx.tags as string[],
+        tags,
       );
 
       await untilDeadline(

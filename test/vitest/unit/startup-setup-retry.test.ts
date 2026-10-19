@@ -86,10 +86,11 @@ function createMockClient() {
         }
         return ['0', [...redisState.hash].flat()];
       }
-      if (args[0] === 'SCAN') {
-        return ['0', [...redisState.hash.keys()].map((key) => 'retry:' + key)];
-      }
       return ['0', []];
+    },
+    // Every cache key exists, so the orphan cleanup removes nothing.
+    async eval() {
+      return [];
     },
     async get() {
       redisState.getCalls++;

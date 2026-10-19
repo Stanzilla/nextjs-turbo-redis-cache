@@ -5,6 +5,10 @@ class HashMockClient {
   hash = new Map<string, string>();
   stringKeys: string[] = [];
   hDelCalls: string[][] = [];
+  evalBatches: string[][] = [];
+  publishes: string[] = [];
+  /** Runs when the cleanup checks if the cache keys exist. */
+  beforeKeyCheck?: () => void;
   isOpen = true;
   isReady = true;
 
@@ -43,9 +47,6 @@ class HashMockClient {
       }
       return ['0', tuples];
     }
-    if (command === 'SCAN') {
-      return ['0', this.stringKeys];
-    }
     throw new Error(`Unexpected sendCommand: ${command}`);
   }
 
@@ -63,30 +64,81 @@ class HashMockClient {
     return list.length;
   }
 
-  async publish() {
+  async publish(_channel: string, message: string) {
+    this.publishes.push(message);
     return 1;
+  }
+
+  /** Emulates the cleanup script: the check and HDEL are one atomic step. */
+  async eval(
+    _script: string,
+    { keys, arguments: fields }: { keys: string[]; arguments: string[] },
+  ) {
+    this.evalBatches.push(fields);
+    this.beforeKeyCheck?.();
+    return fields.filter((field, i) => {
+      if (this.stringKeys.includes(keys[i + 1])) return false;
+      this.hash.delete(field);
+      return true;
+    });
   }
 }
 
+function createMap(client: HashMockClient, querySize = 50) {
+  return new SyncedMap<number>({
+    client: client as never,
+    keyPrefix: 'app:',
+    redisKey: '__sharedTags__',
+    database: 0,
+    querySize,
+    filterKeys: () => true,
+  });
+}
+
 describe('SyncedMap orphan cleanup', () => {
-  it('deletes hash fields whose names are not Redis string keys', async () => {
+  it('deletes hash fields whose cache key is not in Redis', async () => {
     const client = new HashMockClient();
-    const map = new SyncedMap<number>({
-      client: client as never,
-      keyPrefix: 'app:',
-      redisKey: '__revalidated_tags__',
-      database: 0,
-      querySize: 50,
-      filterKeys: () => true,
-    });
+    const map = createMap(client);
     await map.waitUntilReady();
     await map.set('posts', 1);
+    await map.set('live', 2);
 
-    client.stringKeys = ['app:some-cache-entry'];
+    client.stringKeys = ['app:live'];
     await (map as any).initialSync();
 
-    expect(client.hDelCalls.flat()).toContain('posts');
+    expect([...client.hash.keys()]).toEqual(['live']);
     expect(map.get('posts')).toBeUndefined();
+    expect(map.get('live')).toBe(2);
+    expect(client.publishes.at(-1)).toBe(
+      JSON.stringify({ type: 'delete', keys: ['posts'] }),
+    );
+  });
+
+  it('keeps the field of a key that a writer stores during the cleanup', async () => {
+    const client = new HashMockClient();
+    const map = createMap(client);
+    await map.waitUntilReady();
+    await map.set('old', 1);
+
+    client.beforeKeyCheck = () => {
+      client.stringKeys.push('app:old');
+    };
+    await (map as any).initialSync();
+
+    expect(client.hash.has('old')).toBe(true);
+    expect(map.get('old')).toBe(1);
+  });
+
+  it('checks the fields in batches of querySize', async () => {
+    const client = new HashMockClient();
+    const map = createMap(client, 2);
+    await map.waitUntilReady();
+    for (const key of ['a', 'b', 'c', 'd', 'e']) await map.set(key, 1);
+
+    await (map as any).initialSync();
+
+    expect(client.evalBatches).toEqual([['a', 'b'], ['c', 'd'], ['e']]);
+    expect(client.hash.size).toBe(0);
   });
 
   it('keeps tag-manifest fields when withoutOrphanCleanup is set', async () => {
