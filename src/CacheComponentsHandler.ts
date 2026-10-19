@@ -7,9 +7,11 @@ import { debug } from './utils/debug';
 import { resolveKeyPrefix } from './utils/prefix';
 import {
   type Client,
+  RedisNotReadyError,
   redisErrorHandler,
   shouldDeferRedisConnection,
 } from './utils/redisConnection';
+import { ErrorBudget, disconnectAndExit } from './utils/errorBudget';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { compareAndUnlink } from './utils/compareAndUnlink';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
@@ -56,8 +58,6 @@ const REVALIDATED_TAGS_KEY = '__cacheComponents_revalidated_tags__';
 // Older versions kept a tag index in this hash. It is not read anymore, but
 // it can still be in Redis, so it must not look like a cache entry.
 const LEGACY_SHARED_TAGS_KEY = '__cacheComponents_sharedTags__';
-
-let killContainerOnErrorCount = 0;
 
 export type CreateCacheComponentsHandlerOptions =
   CreateRedisStringsHandlerOptions & { serverDistDir?: string };
@@ -108,6 +108,7 @@ function decodeValue(base64: string): ReadableStream<Uint8Array> {
 
 class RedisCacheComponentsHandler implements CacheComponentsHandler {
   private client: Client;
+  private errorBudget: ErrorBudget;
   private revalidatedTagsMap: SyncedMap<TagManifestEntry | number>;
   private inMemoryDeduplicationCache: SyncedMap<Promise<string | null>>;
   private keyPrefix: string;
@@ -146,6 +147,9 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     ),
     serverDistDir,
   }: CreateCacheComponentsHandlerOptions) {
+    this.errorBudget = new ErrorBudget(killContainerOnErrorThreshold, () =>
+      disconnectAndExit(this.client),
+    );
     try {
       this.keyPrefix = resolveKeyPrefix({
         optionKeyPrefix: keyPrefix,
@@ -167,12 +171,9 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         ...(clientOptions || {}),
       });
 
+      this.client.on('ready', () => this.errorBudget.reset());
       this.client.on('error', (error) => {
-        console.error(
-          'RedisCacheComponentsHandler client error',
-          error,
-          killContainerOnErrorCount++,
-        );
+        console.error('RedisCacheComponentsHandler client error', error);
         setTimeout(() => {
           // node-redis throws "Socket already opened" if connect() is called while a socket is already open.
           // When we get an error while isOpen=true (but isReady=false), we should *not* force an extra connect.
@@ -185,21 +186,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
             );
           });
         }, 1000);
-        if (
-          killContainerOnErrorThreshold > 0 &&
-          killContainerOnErrorCount >= killContainerOnErrorThreshold
-        ) {
-          console.error(
-            'RedisCacheComponentsHandler client error threshold reached, disconnecting and exiting (please implement a restart process/container watchdog to handle this error)',
-            error,
-            killContainerOnErrorCount++,
-          );
-          this.client.disconnect();
-          this.client.quit();
-          setTimeout(() => {
-            process.exit(1);
-          }, 500);
-        }
+        this.errorBudget.record(error, 'RedisCacheComponentsHandler client');
       });
 
       if (!this.redisConnectionDeferred) {
@@ -277,7 +264,9 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
           'RedisCacheComponentsHandler assertClientIsReady reconnect error:',
           error,
         );
-        throw error;
+        throw new RedisNotReadyError(
+          'RedisCacheComponentsHandler: Redis client could not reconnect.',
+        );
       });
     }
     await SyncedMap.waitUntilAllReady([this.revalidatedTagsMap]);
@@ -393,8 +382,8 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       console.error(
         'RedisCacheComponentsHandler.get() Error occurred while getting cache entry. Returning undefined so site can continue to serve content while cache is disabled. The original error was:',
         error,
-        killContainerOnErrorCount++,
       );
+      this.errorBudget.record(error, 'RedisCacheComponentsHandler.get()');
       return undefined;
     }
   }
@@ -470,8 +459,8 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       console.error(
         'RedisCacheComponentsHandler.set() Error occurred while setting cache entry. The original error was:',
         error,
-        killContainerOnErrorCount++,
       );
+      this.errorBudget.record(error, 'RedisCacheComponentsHandler.set()');
       throw error;
     }
   }
@@ -539,7 +528,10 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       console.error(
         'RedisCacheComponentsHandler.updateTags() Error occurred while updating tags. The original error was:',
         error,
-        killContainerOnErrorCount++,
+      );
+      this.errorBudget.record(
+        error,
+        'RedisCacheComponentsHandler.updateTags()',
       );
       throw error;
     }
