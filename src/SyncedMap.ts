@@ -60,7 +60,10 @@ export class SyncedMap<V> {
   private readyWaiters = new Set<ReadyWaiter>();
   private subscriberSetup?: Promise<void>;
   private sync?: Promise<void>;
-  private resyncNeeded = false;
+  private resubscribeNeeded = true;
+  private reloadNeeded = false;
+  private resyncTimer?: ReturnType<typeof setInterval>;
+  private closed = false;
 
   constructor(options: SyncedMapOptions) {
     this.client = options.client;
@@ -86,29 +89,38 @@ export class SyncedMap<V> {
     if (!this.customizedSync?.withoutRedisHashmap) {
       this.setupPeriodicResync();
     }
-    await this.subscribeAndSync();
+    await this.runSync();
   }
 
   /**
-   * Sync messages published while no subscriber listens are lost. Subscribe
-   * first, then load the Redis hash, so the map misses no entry. Run again if
-   * the subscriber fails during the load.
+   * The only path that changes the subscriber or reloads the hash, so two
+   * scans never overlap. A request that arrives during a run sets a flag and
+   * the run repeats. Sync messages published while no subscriber listens are
+   * lost, so a new subscriber is always followed by a reload.
    */
-  private subscribeAndSync(): Promise<void> {
+  private runSync(): Promise<void> {
     this.sync ??= (async () => {
-      do {
-        this.resyncNeeded = false;
-        await this.reconnectSubscriber();
+      while (this.resubscribeNeeded || this.reloadNeeded) {
+        if (this.resubscribeNeeded) {
+          this.resubscribeNeeded = false;
+          await this.reconnectSubscriber();
+          this.reloadNeeded = true;
+        }
+        this.reloadNeeded = false;
         if (!this.customizedSync?.withoutRedisHashmap) {
           await this.retryUntilSuccess('Initial sync', () =>
             this.initialSync(),
           );
         }
-      } while (this.resyncNeeded);
+      }
       this.markReady();
-    })().finally(() => {
-      this.sync = undefined;
-    });
+    })()
+      .catch((error) => {
+        if (!this.closed) throw error;
+      })
+      .finally(() => {
+        this.sync = undefined;
+      });
     return this.sync;
   }
 
@@ -126,9 +138,10 @@ export class SyncedMap<V> {
     console.error('Subscriber client error:', error);
     this.isSetUp = false;
     this.recordSetupError(error);
+    if (this.closed) return;
     // A subscriber setup in flight already creates a new client.
-    if (!this.subscriberSetup) this.resyncNeeded = true;
-    void this.subscribeAndSync();
+    if (!this.subscriberSetup) this.resubscribeNeeded = true;
+    void this.runSync();
   }
 
   /**
@@ -140,9 +153,11 @@ export class SyncedMap<V> {
     operation: () => Promise<void>,
   ): Promise<void> {
     for (let attempt = 0; ; attempt++) {
+      if (this.closed) throw new Error(`SyncedMap ${this.redisKey} is closed`);
       try {
         return await operation();
       } catch (error) {
+        if (this.closed) throw error;
         this.recordSetupError(error);
         const delay = retryDelayMs(attempt);
         console.error(
@@ -240,11 +255,36 @@ export class SyncedMap<V> {
 
   private setupPeriodicResync() {
     if (this.resyncIntervalMs && this.resyncIntervalMs > 0) {
-      setInterval(() => {
-        this.initialSync().catch((error) => {
+      this.resyncTimer = setInterval(() => {
+        this.reloadNeeded = true;
+        this.runSync().catch((error) => {
           console.error('Error during periodic resync:', error);
         });
       }, this.resyncIntervalMs);
+      // The resync must not keep the process alive.
+      this.resyncTimer.unref?.();
+    }
+  }
+
+  /**
+   * Stops the periodic resync and the subscriber. Running setup retries stop
+   * at their next attempt. The shared main client stays open.
+   */
+  public async close(): Promise<void> {
+    this.closed = true;
+    clearInterval(this.resyncTimer);
+    this.resyncTimer = undefined;
+    const subscriber = this.subscriberClient;
+    this.subscriberClient = undefined;
+    await this.disconnectSubscriber(subscriber);
+  }
+
+  private async disconnectSubscriber(subscriber: Client | undefined) {
+    try {
+      subscriber?.removeAllListeners('error');
+      await subscriber?.disconnect();
+    } catch {
+      // expected during outage
     }
   }
 
@@ -374,15 +414,11 @@ export class SyncedMap<V> {
         // zombie client that still fires our error handler. Remove that
         // handler first so a delayed error from the old socket cannot tear
         // down the replacement subscriber we are about to create.
-        try {
-          this.subscriberClient?.removeAllListeners('error');
-          await this.subscriberClient?.disconnect();
-        } catch {
-          // expected during outage
-        }
+        await this.disconnectSubscriber(this.subscriberClient);
         const subscriber = this.client.duplicate();
         this.subscriberClient = subscriber;
         await this.setupPubSub(subscriber);
+        if (this.closed) await this.disconnectSubscriber(subscriber);
       },
     ).finally(() => {
       this.subscriberSetup = undefined;
@@ -392,6 +428,8 @@ export class SyncedMap<V> {
 
   private recordSetupError(error: unknown) {
     this.lastSetupError = error;
+    // A failed periodic reload leaves the loaded map usable.
+    if (this.isSetUp) return;
     for (const waiter of this.readyWaiters) waiter.fail(this.notReadyError());
   }
 
