@@ -1,4 +1,4 @@
-import { createClient, RedisClientOptions } from 'redis';
+import type { RedisClientOptions } from 'redis';
 import { SyncedMap } from './SyncedMap';
 import { DeduplicatedRequestHandler } from './DeduplicatedRequestHandler';
 import { debug } from './utils/debug';
@@ -16,6 +16,7 @@ import {
   closeClient,
   disconnectAndExit,
 } from './utils/errorBudget';
+import { createCacheClient } from './utils/cacheClient';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
 import { compareAndUnlink } from './utils/compareAndUnlink';
@@ -346,45 +347,15 @@ export default class RedisStringsHandler {
       this.redisConnectionDeferred = shouldDeferRedisConnection();
 
       try {
-        // Create Redis client with properly typed configuration
-        this.client = createClient({
-          url: redisUrl,
-          pingInterval: 10_000, // Useful with Redis deployments that do not use TCP Keep-Alive. Restarts the connection if it is idle for too long.
-          ...(database !== 0 ? { database } : {}),
-          ...(socketOptions ? { socket: { ...socketOptions } } : {}),
-          ...(clientOptions || {}),
+        this.client = createCacheClient({
+          label: 'Redis client',
+          redisUrl,
+          database,
+          socketOptions,
+          clientOptions,
+          errorBudget: this.errorBudget,
+          deferConnection: this.redisConnectionDeferred,
         });
-
-        this.client.on('ready', () => this.errorBudget.reset());
-        this.client.on('error', (error) => {
-          console.error('Redis client error', error);
-          setTimeout(() => {
-            // Avoid overlapping connect() calls which can lead to
-            // "Socket already opened" errors when a reconnect is already
-            // in progress or the socket is still open.
-            if (!this.client.isOpen && !this.client.isReady) {
-              this.client.connect().catch((error) => {
-                console.error(
-                  'Failed to reconnect Redis client after connection loss:',
-                  error,
-                );
-              });
-            }
-          }, 1000);
-          this.errorBudget.record(error, 'Redis client');
-        });
-
-        if (!this.redisConnectionDeferred) {
-          this.client
-            .connect()
-            .then(() => {
-              debug('green', 'Redis client connected.');
-            })
-            .catch((error) => {
-              console.error('Failed to connect Redis client:', error);
-              throw error;
-            });
-        }
       } catch (error: unknown) {
         console.error('Failed to initialize Redis client');
         throw error;
