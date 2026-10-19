@@ -9,6 +9,7 @@ class HashMockClient {
   publishes: string[] = [];
   /** Runs when the cleanup checks if the cache keys exist. */
   beforeKeyCheck?: () => void;
+  evalError?: Error;
   isOpen = true;
   isReady = true;
 
@@ -69,18 +70,29 @@ class HashMockClient {
     return 1;
   }
 
-  /** Emulates the cleanup script: the check and HDEL are one atomic step. */
+  /** Emulates the cleanup script: the check, HDEL and PUBLISH are one step. */
   async eval(
     _script: string,
-    { keys, arguments: fields }: { keys: string[]; arguments: string[] },
+    {
+      keys,
+      arguments: [channel, ...fields],
+    }: { keys: string[]; arguments: string[] },
   ) {
+    if (this.evalError) throw this.evalError;
     this.evalBatches.push(fields);
     this.beforeKeyCheck?.();
-    return fields.filter((field, i) => {
+    const removed = fields.filter((field, i) => {
       if (this.stringKeys.includes(keys[i + 1])) return false;
       this.hash.delete(field);
       return true;
     });
+    if (removed.length > 0) {
+      await this.publish(
+        channel,
+        JSON.stringify({ type: 'delete', keys: removed }),
+      );
+    }
+    return removed;
   }
 }
 
@@ -139,6 +151,18 @@ describe('SyncedMap orphan cleanup', () => {
 
     expect(client.evalBatches).toEqual([['a', 'b'], ['c', 'd'], ['e']]);
     expect(client.hash.size).toBe(0);
+  });
+
+  it('stays ready when the cleanup script fails', async () => {
+    const client = new HashMockClient();
+    const map = createMap(client);
+    await map.waitUntilReady();
+    await map.set('posts', 1);
+
+    client.evalError = new Error('BUSY Redis is busy running a script');
+    await expect((map as any).initialSync()).resolves.toBeUndefined();
+
+    expect(map.get('posts')).toBe(1);
   });
 
   it('keeps tag-manifest fields when withoutOrphanCleanup is set', async () => {
