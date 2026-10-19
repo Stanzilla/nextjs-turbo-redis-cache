@@ -19,7 +19,6 @@ type SendCommandArgs = string[];
 /** Minimal Redis client mock for SyncedMap startup tests. */
 class ScanCursorMockClient {
   hscanCalls: string[];
-  scanCalls: string[];
   hash = new Map<string, string>();
   stringKeys: string[] = [];
   isOpen = true;
@@ -27,7 +26,6 @@ class ScanCursorMockClient {
 
   constructor() {
     this.hscanCalls = [];
-    this.scanCalls = [];
   }
 
   on() {
@@ -73,6 +71,13 @@ class ScanCursorMockClient {
     return 1;
   }
 
+  async eval(
+    _script: string,
+    { keys, arguments: fields }: { keys: string[]; arguments: string[] },
+  ) {
+    return fields.filter((_, i) => !this.stringKeys.includes(keys[i + 1]));
+  }
+
   /**
    * Simulates a Redis server that requires the exact uint64 cursor string.
    * Returns the large cursor again when the client sends the rounded value.
@@ -101,25 +106,6 @@ class ScanCursorMockClient {
       }
 
       throw new Error(`unexpected HSCAN cursor: ${cursor}`);
-    }
-
-    if (command === 'SCAN') {
-      const cursor = rest[0];
-      this.scanCalls.push(cursor);
-
-      if (cursor === '0') {
-        return [LARGE_CURSOR, []];
-      }
-
-      if (cursor === ROUNDED_CURSOR) {
-        return [LARGE_CURSOR, []];
-      }
-
-      if (cursor === LARGE_CURSOR) {
-        return ['0', this.stringKeys];
-      }
-
-      throw new Error(`unexpected SCAN cursor: ${cursor}`);
     }
 
     throw new Error(`unexpected sendCommand: ${command}`);
@@ -234,46 +220,7 @@ describe('SyncedMap SCAN/HSCAN cursor precision (issue #97)', () => {
     });
   });
 
-  describe('cleanupKeysNotInRedis() via SCAN', () => {
-    it('completes and collects keys from the final SCAN page', async () => {
-      const client = new ScanCursorMockClient();
-      client.stringKeys = ['app:cache-entry'];
-
-      const map = new SyncedMap<number>({
-        client: client as never,
-        keyPrefix: 'app:',
-        redisKey: '__revalidated_tags__',
-        database: 0,
-        querySize: 250,
-        filterKeys: () => true,
-      });
-
-      await expectCompletesWithin(map.waitUntilReady(), 1000);
-
-      expect(client.hscanCalls).toEqual(['0', LARGE_CURSOR]);
-      expect(client.scanCalls).toEqual(['0', LARGE_CURSOR]);
-    });
-
-    it('does not hang when SCAN pagination uses a uint64 cursor', async () => {
-      const client = new ScanCursorMockClient();
-      client.stringKeys = ['app:cache-entry'];
-
-      const map = new SyncedMap<number>({
-        client: client as never,
-        keyPrefix: 'app:',
-        redisKey: '__revalidated_tags__',
-        database: 0,
-        querySize: 250,
-        filterKeys: () => true,
-      });
-
-      await expectCompletesWithin(map.waitUntilReady(), 1000);
-      expect(client.scanCalls.length).toBeLessThanOrEqual(2);
-      expect(client.scanCalls).not.toContain(ROUNDED_CURSOR);
-    });
-  });
-
-  describe('full Cache Components-style startup (HSCAN + SCAN)', () => {
+  describe('full Cache Components-style startup', () => {
     it('waitUntilReady() resolves for both maps without rounded cursors', async () => {
       const client = new ScanCursorMockClient();
       client.hash.set('posts', JSON.stringify(1));
@@ -309,9 +256,6 @@ describe('SyncedMap SCAN/HSCAN cursor precision (issue #97)', () => {
       expect(
         client.hscanCalls.every((cursor) => cursor !== ROUNDED_CURSOR),
       ).toBe(true);
-      expect(
-        client.scanCalls.every((cursor) => cursor !== ROUNDED_CURSOR),
-      ).toBe(true);
     });
   });
 
@@ -327,10 +271,6 @@ describe('SyncedMap SCAN/HSCAN cursor precision (issue #97)', () => {
             }
             this.hscanCalls.push('0');
             return ['0', tuples];
-          }
-          if (command === 'SCAN') {
-            this.scanCalls.push('0');
-            return ['0', this.stringKeys];
           }
           return super.sendCommand(args);
         }
