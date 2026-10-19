@@ -19,6 +19,10 @@ export type CacheClientOptions = {
  * Creates the main client of a cache handler with one reconnect rule and one
  * error budget. The initial connect only logs a failure: the 'error' listener
  * owns reconnects, and nothing awaits the constructor's connect promise.
+ *
+ * When `socketOptions.reconnectStrategy` is set, the listener does not
+ * reconnect. A closed client then means that the user strategy gave up on
+ * purpose.
  */
 export function createCacheClient({
   label,
@@ -39,9 +43,17 @@ export function createCacheClient({
     ...(clientOptions || {}),
   });
 
+  const hasUserReconnectStrategy =
+    socketOptions?.reconnectStrategy !== undefined;
+
   client.on('ready', () => errorBudget.reset());
   client.on('error', (error) => {
     console.error(`${label} error`, error);
+    if (!hasUserReconnectStrategy) scheduleReconnect();
+    errorBudget.record(error, label);
+  });
+
+  function scheduleReconnect() {
     setTimeout(() => {
       // An open socket that is not ready is already reconnecting. A second
       // connect() throws "Socket already opened".
@@ -53,8 +65,7 @@ export function createCacheClient({
         );
       });
     }, 1000);
-    errorBudget.record(error, label);
-  });
+  }
 
   if (!deferConnection) {
     client
