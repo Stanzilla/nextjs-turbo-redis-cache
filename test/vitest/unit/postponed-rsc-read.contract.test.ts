@@ -114,45 +114,13 @@ function resolveNextFixture(app: string, versionPrefix: string) {
 const nextFixture = resolveNextFixture('next-app-16-3-0', '16.3.');
 const next164Fixture = resolveNextFixture('next-app-16-4-2', '16.4.');
 
-const hoisted = vi.hoisted(() => {
-  const store = new Map<string, { value: string; ex?: number }>();
-  return { store };
-});
+const hoisted = await vi.hoisted(async () =>
+  (await import('./utils/redisMock')).createRedisMockState(),
+);
 
-vi.mock('redis', () => {
-  const createClient = () => ({
-    isReady: true,
-    on: vi.fn(),
-    connect: vi.fn(async () => undefined),
-    disconnect: vi.fn(),
-    quit: vi.fn(),
-    duplicate: vi.fn(() => ({
-      connect: vi.fn(async () => undefined),
-      subscribe: vi.fn(async () => undefined),
-      on: vi.fn(),
-      quit: vi.fn(async () => undefined),
-      configGet: vi.fn(async () => ({ 'notify-keyspace-events': 'Exe' })),
-    })),
-    get: vi.fn(
-      async (_opts: unknown, key: string) =>
-        hoisted.store.get(key)?.value ?? null,
-    ),
-    hScan: vi.fn(async () => ({ cursor: 0, tuples: [] })),
-    scan: vi.fn(async () => ({ cursor: 0, keys: [] })),
-    hSet: vi.fn(async () => 1),
-    hDel: vi.fn(async () => 1),
-    publish: vi.fn(async () => 1),
-    unlink: vi.fn(async () => 1),
-    set: vi.fn(async (key: string, value: string, opts?: { EX?: number }) => {
-      hoisted.store.set(key, { value, ex: opts?.EX });
-      return 'OK';
-    }),
-  });
-  return {
-    createClient,
-    commandOptions: vi.fn((opts) => opts),
-  };
-});
+vi.mock('redis', async () =>
+  (await import('./utils/redisMock')).createRedisModuleMock(hoisted),
+);
 
 vi.mock('../../../src/SyncedMap', () => {
   class SyncedMap {
@@ -225,7 +193,7 @@ describe.runIf(!!nextFixture)(
     let warnSpy: ReturnType<typeof vi.spyOn>;
 
     beforeEach(async () => {
-      hoisted.store.clear();
+      hoisted.reset();
       fixtureRoot = await fs.mkdtemp(
         path.join(os.tmpdir(), 'nextjs-turbo-rsc-contract-'),
       );
@@ -345,7 +313,7 @@ describe('APP_PAGE get() edge cases (#102)', () => {
   let warnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    hoisted.store.clear();
+    hoisted.reset();
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
   });
@@ -521,7 +489,7 @@ describe.runIf(!!next164Fixture)(
     let fixtureRoot: string;
 
     beforeEach(async () => {
-      hoisted.store.clear();
+      hoisted.reset();
       fixtureRoot = await fs.mkdtemp(
         path.join(os.tmpdir(), 'nextjs-turbo-cache-control-contract-'),
       );
