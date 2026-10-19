@@ -85,4 +85,17 @@ describe('resolveCacheEntryTtlSeconds', () => {
 
     expect(ttl).toBe(1);
   });
+
+  it.each([Infinity, NaN])(
+    'sets no TTL when estimateExpireAge returns %s',
+    (value) => {
+      const ttl = resolveCacheEntryTtlSeconds(
+        { revalidate: false },
+        { kind: 'PAGES' },
+        { estimateExpireAge: () => value, defaultStaleAge },
+      );
+
+      expect(ttl).toBeUndefined();
+    },
+  );
 });
