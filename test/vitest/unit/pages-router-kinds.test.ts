@@ -290,23 +290,54 @@ describe('RedisStringsHandler Pages Router kinds', () => {
       expect(errorSpy).not.toHaveBeenCalled();
     });
 
-    it('get() still warns for a malformed entry with a missing (undefined) value', async () => {
+    it('get() misses and warns for a malformed entry with a missing (undefined) value', async () => {
       const handler = createHandler();
       hoisted.store.set(KEY_PREFIX + '/malformed', {
         value: JSON.stringify({ lastModified: Date.now(), tags: [] }),
       });
 
-      await handler.get('/malformed', {
+      const result = await handler.get('/malformed', {
         kind: 'PAGES',
         isFallback: false,
       });
 
+      expect(result).toBeNull();
       expect(warnSpy).toHaveBeenCalledWith(
-        'RedisStringsHandler.get() called with',
-        '/malformed',
-        expect.anything(),
-        'cacheEntry is mall formed (missing value)',
+        'RedisStringsHandler.get() cacheEntry is malformed, treating as cache miss',
+        KEY_PREFIX + '/malformed',
+        'missing value',
       );
+    });
+  });
+
+  describe('malformed FETCH entries', () => {
+    const fetchCtx = {
+      kind: 'FETCH' as const,
+      revalidate: 60,
+      fetchUrl: 'https://example.com',
+      fetchIdx: 0,
+      tags: ['posts'],
+    };
+    const value = { kind: 'FETCH', data: { body: '' }, revalidate: 60 };
+
+    it.each([
+      ['missing lastModified', { value, tags: ['posts'] }],
+      ['missing tags', { value, lastModified: Date.now() }],
+    ])('get() misses for an entry with %s', async (reason, entry) => {
+      const handler = createHandler();
+      hoisted.store.set(KEY_PREFIX + 'fetch-key', {
+        value: JSON.stringify(entry),
+      });
+
+      const result = await handler.get('fetch-key', fetchCtx as never);
+
+      expect(result).toBeNull();
+      expect(warnSpy).toHaveBeenCalledWith(
+        'RedisStringsHandler.get() cacheEntry is malformed, treating as cache miss',
+        KEY_PREFIX + 'fetch-key',
+        reason,
+      );
+      expect(errorSpy).not.toHaveBeenCalled();
     });
   });
 

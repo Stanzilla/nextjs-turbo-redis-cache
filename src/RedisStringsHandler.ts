@@ -265,6 +265,19 @@ const SUPPORTED_SET_KINDS = [
   'FETCH',
 ] as const;
 
+/**
+ * Returns why a deserialized entry cannot be served, or undefined if it can.
+ * `value: null` is valid: the Pages Router stores `notFound: true` results as
+ * an entry with a null value.
+ */
+function malformedCacheEntryReason(entry: CacheEntry): string | undefined {
+  if (typeof entry !== 'object') return 'not an object';
+  if (!Array.isArray(entry.tags)) return 'missing tags';
+  if (entry.value === undefined) return 'missing value';
+  if (!Number.isFinite(entry.lastModified)) return 'missing lastModified';
+  return undefined;
+}
+
 export default class RedisStringsHandler {
   // Not set when createClient() throws in the constructor.
   private client!: Client;
@@ -548,32 +561,16 @@ export default class RedisStringsHandler {
         return null;
       }
 
-      if (!cacheEntry?.tags) {
+      const malformed = malformedCacheEntryReason(cacheEntry);
+      if (malformed) {
+        // Without tags or lastModified the staleness checks below cannot
+        // run, so a malformed entry is a miss. It is not an error.
         console.warn(
-          'RedisStringsHandler.get() called with',
-          key,
-          ctx,
-          'cacheEntry is mall formed (missing tags)',
+          'RedisStringsHandler.get() cacheEntry is malformed, treating as cache miss',
+          this.keyPrefix + key,
+          malformed,
         );
-      }
-      // value === null is a legitimate entry: the Pages Router stores
-      // `notFound: true` results as a cache entry with a null value.
-      // Only an absent value indicates a malformed entry.
-      if (cacheEntry?.value === undefined) {
-        console.warn(
-          'RedisStringsHandler.get() called with',
-          key,
-          ctx,
-          'cacheEntry is mall formed (missing value)',
-        );
-      }
-      if (!cacheEntry?.lastModified) {
-        console.warn(
-          'RedisStringsHandler.get() called with',
-          key,
-          ctx,
-          'cacheEntry is mall formed (missing lastModified)',
-        );
+        return null;
       }
 
       if (ctx.kind === 'FETCH') {
