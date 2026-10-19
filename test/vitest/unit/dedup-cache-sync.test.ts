@@ -200,6 +200,21 @@ describe('in-memory read cache across instances', () => {
     expect(await readHtml(reader)).toBe('v1');
   });
 
+  it('does not serve the value of a failed Redis SET on the writing instance', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const writer = createInstance(10_000);
+    await writer.set(KEY, page('v1'), setCtx);
+    // Let the successful SET remove the seed of v1.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    hoisted.control.failSet = true;
+    await expect(writer.set(KEY, page('v2'), setCtx)).rejects.toThrow(
+      'SET failed',
+    );
+
+    expect(await readHtml(writer)).toBe('v1');
+  });
+
   it('does not keep an old value read while set() runs on another instance', async () => {
     const writer = createInstance(10_000);
     const reader = createInstance(10_000);
