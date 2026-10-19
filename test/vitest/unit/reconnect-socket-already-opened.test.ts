@@ -119,4 +119,28 @@ describe('RedisCacheComponentsHandler reconnect logic', () => {
     );
     expect(msgs).not.toContain('Socket already opened');
   });
+
+  it('does not reopen a closed client on read (a user reconnectStrategy gave up)', async () => {
+    vi.resetModules();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { getRedisCacheComponentsHandler } = await import('../../../src');
+
+    const handler = getRedisCacheComponentsHandler({
+      redisUrl: 'redis://127.0.0.1:6399',
+      socketOptions: { reconnectStrategy: () => false } as any,
+    });
+
+    const client = (handler as any).client;
+    vi.mocked(client.connect).mockClear();
+    Object.defineProperty(client, 'isOpen', { value: false });
+    Object.defineProperty(client, 'isReady', { value: false });
+
+    await expect(handler.get('key', [])).resolves.toBeUndefined();
+    await handler.getExpiration(['tag']);
+    await handler.refreshTags();
+
+    expect(client.connect).not.toHaveBeenCalled();
+    expect(client.get).not.toHaveBeenCalled();
+  });
 });
