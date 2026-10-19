@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import fetch from 'node-fetch';
 import { createClient, RedisClientType } from 'redis';
 import { join } from 'path';
@@ -9,6 +8,7 @@ import {
   createRouteCacheLookup,
   nextVersionAtLeast,
 } from './route-cache-lookup';
+import { NextFixture, startNextFixture } from './next-fixture';
 
 // Select which Pages Router test app to use. Can be overridden via NEXT_PAGES_TEST_APP env var
 const NEXT_PAGES_TEST_APP =
@@ -43,8 +43,7 @@ const ISR_REVALIDATE_SECONDS = 300;
 // default stale age of the cache handler (14 days)
 const DEFAULT_STALE_AGE = 60 * 60 * 24 * 14;
 
-let instanceA: ChildProcessWithoutNullStreams;
-let instanceB: ChildProcessWithoutNullStreams;
+let nextFixture: NextFixture | undefined;
 let redisClient: RedisClientType;
 let buildId: string;
 
@@ -70,72 +69,6 @@ function expectIsrRedisTtl(ttl: number) {
   expect(ttl).toBeLessThanOrEqual(2 * ISR_REVALIDATE_SECONDS);
 }
 
-async function runCommand(cmd: string, args: string[], cwd: string) {
-  return new Promise((resolve, reject) => {
-    let stderr = '';
-    let stdout = '';
-    const proc = spawn(cmd, args, { cwd, stdio: 'pipe' });
-
-    proc.stdout.on('data', (data) => {
-      if (process.env.DEBUG_INTEGRATION) {
-        console.log(data.toString());
-      }
-      stdout += data.toString();
-    });
-
-    proc.stderr.on('data', (data) => {
-      if (process.env.DEBUG_INTEGRATION) {
-        console.error(data.toString());
-      }
-      stderr += data.toString();
-    });
-
-    proc.on('exit', (code) => {
-      if (code === 0) resolve(undefined);
-      else {
-        reject(
-          new Error(
-            `${cmd} ${args.join(' ')} failed with code ${code}\n` +
-              `stdout: ${stdout}\n` +
-              `stderr: ${stderr}`,
-          ),
-        );
-      }
-    });
-  });
-}
-
-function startInstance(port: number): ChildProcessWithoutNullStreams {
-  const proc = spawn('npx', ['next', 'start', '-p', String(port)], {
-    cwd: NEXT_APP_DIR,
-    env: {
-      ...process.env,
-    },
-    stdio: 'pipe',
-  });
-  if (process.env.DEBUG_INTEGRATION) {
-    proc.stdout.on('data', (data) => {
-      console.log(`stdout(:${port}): ${data}`);
-    });
-  }
-  proc.stderr.on('data', (data) => {
-    console.error(`stderr(:${port}): ${data}`);
-  });
-  return proc;
-}
-
-async function waitForServer(url: string, timeout = 20000) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    try {
-      const res = await fetch(url);
-      if (res.ok) return;
-    } catch {}
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  throw new Error(`Next.js server at ${url} did not start in time`);
-}
-
 function extractTimestamp(html: string): number {
   const match = html.match(/Timestamp: (?:<!-- -->)?(\d+)/)?.[1];
   expect(match).toBeDefined();
@@ -150,16 +83,6 @@ function extractCounter(html: string): number {
 
 describe('Pages Router Redis cache integration (two instances)', () => {
   beforeAll(async () => {
-    // If old servers from a previous run are still around, kill them
-    for (const port of [INSTANCE_A_PORT, INSTANCE_B_PORT]) {
-      try {
-        const res = await fetch(`http://localhost:${port}`);
-        if (res.ok) {
-          await runCommand('pkill', ['-f', `next start -p ${port}`], '.');
-        }
-      } catch {}
-    }
-
     // Set up environment variables
     process.env.VERCEL_ENV = 'production';
     process.env.VERCEL_URL =
@@ -170,27 +93,16 @@ describe('Pages Router Redis cache integration (two instances)', () => {
     process.env.REDISHOST = process.env.REDISHOST || 'localhost';
     process.env.REDISPORT = process.env.REDISPORT || '6379';
 
-    if (process.env.SKIP_BUILD === 'true') {
-      console.log('skipping build');
-    } else {
-      await runCommand('pnpm', ['i'], NEXT_APP_DIR);
-      console.log('pnpm i done');
-      await runCommand('pnpm', ['build'], NEXT_APP_DIR);
-      console.log('pnpm build done');
-    }
+    // Two instances of the same build sharing one Redis
+    nextFixture = await startNextFixture({
+      appDir: NEXT_APP_DIR,
+      ports: [INSTANCE_A_PORT, INSTANCE_B_PORT],
+    });
+    console.log('both next instances started');
 
     buildId = readFileSync(join(NEXT_APP_DIR, '.next', 'BUILD_ID'), 'utf-8')
       .toString()
       .trim();
-
-    // Start two Next.js instances of the same build sharing one Redis
-    instanceA = startInstance(INSTANCE_A_PORT);
-    instanceB = startInstance(INSTANCE_B_PORT);
-    await Promise.all([
-      waitForServer(INSTANCE_A_URL),
-      waitForServer(INSTANCE_B_URL),
-    ]);
-    console.log('both next instances started');
 
     // Connect to Redis
     redisClient = createClient({
@@ -200,12 +112,7 @@ describe('Pages Router Redis cache integration (two instances)', () => {
   }, 240_000);
 
   afterAll(async () => {
-    if (process.env.KEEP_SERVER_RUNNING === 'true') {
-      console.log('keeping servers running');
-    } else {
-      if (instanceA) instanceA.kill();
-      if (instanceB) instanceB.kill();
-    }
+    await nextFixture?.stop();
     if (redisClient) await redisClient.quit();
   });
 
