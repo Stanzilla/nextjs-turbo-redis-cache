@@ -1,3 +1,7 @@
+import type { createClient } from 'redis';
+
+export type Client = ReturnType<typeof createClient>;
+
 /**
  * Matches `PHASE_PRODUCTION_BUILD` from `next/constants`.
  *
@@ -14,4 +18,22 @@ export const PHASE_PRODUCTION_BUILD = 'phase-production-build';
  */
 export function shouldDeferRedisConnection(): boolean {
   return process.env.NEXT_PHASE === PHASE_PRODUCTION_BUILD;
+}
+
+/** Logs a failed Redis command with its duration, then rethrows the error. */
+export function redisErrorHandler<T extends Promise<unknown>>(
+  debugInfo: string,
+  redisCommandResult: T,
+): T {
+  const beforeTimestamp = performance.now();
+  return redisCommandResult.catch((error) => {
+    console.error(
+      'Redis command error',
+      (performance.now() - beforeTimestamp).toFixed(2),
+      'ms',
+      debugInfo,
+      error,
+    );
+    throw error;
+  }) as T;
 }
