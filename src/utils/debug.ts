@@ -1,3 +1,5 @@
+const RESET = '\x1b[0m';
+
 export function debug(
   color:
     | 'red'
@@ -19,12 +21,16 @@ export function debug(
     none: '',
   };
   if (process.env.DEBUG_CACHE_HANDLER) {
-    console.log(colorCode[color], 'DEBUG CACHE HANDLER: ', ...args);
+    console.log(colorCode[color], 'DEBUG CACHE HANDLER: ', ...args, RESET);
   }
 }
 
-export function debugVerbose(color: string, ...args: unknown[]) {
-  if (process.env.DEBUG_CACHE_HANDLER_VERBOSE_VERBOSE) {
-    console.log('\x1b[35m', 'DEBUG SYNCED MAP: ', ...args);
+export function debugVerbose(...args: unknown[]): void {
+  if (
+    process.env.DEBUG_CACHE_HANDLER_VERBOSE ||
+    // Deprecated name, kept for one release.
+    process.env.DEBUG_CACHE_HANDLER_VERBOSE_VERBOSE
+  ) {
+    console.log('\x1b[35m', 'DEBUG CACHE HANDLER (verbose): ', ...args, RESET);
   }
 }
