@@ -73,7 +73,7 @@ class ScanCursorMockClient {
 
   async eval(
     _script: string,
-    { keys, arguments: fields }: { keys: string[]; arguments: string[] },
+    { keys, arguments: [, ...fields] }: { keys: string[]; arguments: string[] },
   ) {
     return fields.filter((_, i) => !this.stringKeys.includes(keys[i + 1]));
   }

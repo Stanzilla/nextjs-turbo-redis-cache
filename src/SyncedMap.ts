@@ -33,14 +33,21 @@ export type SyncMessage<V> = {
 
 const SYNC_CHANNEL_SUFFIX = ':sync-channel:';
 
-/** KEYS[1] is the hash, KEYS[i + 1] is the cache key of field ARGV[i]. */
+/**
+ * KEYS[1] is the hash and ARGV[1] is the sync channel. For i >= 2, KEYS[i] is
+ * the cache key of field ARGV[i]. The delete message is published in the same
+ * step, so peers cannot miss a removed field.
+ */
 const DELETE_FIELDS_WITHOUT_KEY = `
 local removed = {}
-for i, field in ipairs(ARGV) do
-  if redis.call('EXISTS', KEYS[i + 1]) == 0 then
-    redis.call('HDEL', KEYS[1], field)
-    removed[#removed + 1] = field
+for i = 2, #ARGV do
+  if redis.call('EXISTS', KEYS[i]) == 0 then
+    redis.call('HDEL', KEYS[1], ARGV[i])
+    removed[#removed + 1] = ARGV[i]
   end
+end
+if #removed > 0 then
+  redis.call('PUBLISH', ARGV[1], cjson.encode({ type = 'delete', keys = removed }))
 end
 return removed
 `;
@@ -237,6 +244,10 @@ export class SyncedMap<V> {
    * deletes in one step, so a key that a writer stores during the cleanup
    * keeps its field. Only keys of the local snapshot are checked, so the cost
    * follows the map size, not the size of the keyspace.
+   *
+   * The cleanup is best-effort: the map is already loaded, and a failure only
+   * keeps some orphan fields until the next resync. It must not keep the map
+   * unready, for example when a busy server blocks the script.
    */
   private async cleanupKeysNotInRedis() {
     const fields = [...this.map.keys()].filter((key) => this.filterKeys(key));
@@ -252,16 +263,13 @@ export class SyncedMap<V> {
               this.keyPrefix + this.redisKey,
               ...batch.map((field) => this.keyPrefix + field),
             ],
-            arguments: batch,
+            arguments: [this.syncChannel, ...batch],
           }),
         )) as string[];
-        if (removed.length === 0) continue;
         for (const key of removed) this.map.delete(key);
-        await this.publishDeletion(removed);
       }
     } catch (error) {
       console.error('Error during cleanup of keys not in Redis:', error);
-      throw error;
     }
   }
 
