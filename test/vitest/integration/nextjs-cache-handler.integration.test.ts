@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import fetch from 'node-fetch';
 import { createClient, RedisClientType } from 'redis';
 import { join } from 'path';
@@ -8,6 +7,7 @@ import {
   createRouteCacheLookup,
   nextVersionAtLeast,
 } from './route-cache-lookup';
+import { NextFixture, startNextFixture } from './next-fixture';
 import { revalidate as revalidatedFetchRouteRevalidate } from '../../nextjs-test-projects/next-app-15-4-11/src/app/api/revalidated-fetch/route';
 
 // Select which Next.js test app to use. Can be overridden via NEXT_TEST_APP env var
@@ -28,7 +28,7 @@ const NEXT_START_URL = `http://localhost:${NEXT_START_PORT}`;
 
 const REDIS_BACKGROUND_SYNC_DELAY = 250; //ms delay to prevent flaky tests in slow CI environments
 
-let nextProcess: ChildProcessWithoutNullStreams;
+let nextFixture: NextFixture | undefined;
 let redisClient: RedisClientType;
 
 const { findRouteKeys, getRouteKey, findRouteSharedTags } =
@@ -55,63 +55,8 @@ async function findFetchCacheEntryKey(tag: string): Promise<string> {
   return matches[0]![0];
 }
 
-async function runCommand(cmd: string, args: string[], cwd: string) {
-  return new Promise((resolve, reject) => {
-    let stderr = '';
-    let stdout = '';
-    const proc = spawn(cmd, args, { cwd, stdio: 'pipe' });
-
-    proc.stdout.on('data', (data) => {
-      if (process.env.DEBUG_INTEGRATION) {
-        console.log(data.toString());
-      }
-      stdout += data.toString();
-    });
-
-    proc.stderr.on('data', (data) => {
-      if (process.env.DEBUG_INTEGRATION) {
-        console.error(data.toString());
-      }
-      stderr += data.toString();
-    });
-
-    proc.on('exit', (code) => {
-      if (code === 0) resolve(undefined);
-      else {
-        reject(
-          new Error(
-            `${cmd} ${args.join(' ')} failed with code ${code}\n` +
-              `stdout: ${stdout}\n` +
-              `stderr: ${stderr}`,
-          ),
-        );
-      }
-    });
-  });
-}
-
-async function waitForServer(url: string, timeout = 20000) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    try {
-      const res = await fetch(url + '/api/cached-static-fetch');
-      if (res.ok) return;
-    } catch {}
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  throw new Error('Next.js server did not start in time');
-}
-
 describe('Next.js Turbo Redis Cache Integration', () => {
   beforeAll(async () => {
-    // If there was detected to run a server before (any old server which was not stopped correctly), kill it
-    try {
-      const res = await fetch(NEXT_START_URL + '/api/cached-static-fetch');
-      if (res.ok) {
-        await runCommand('pkill', ['next'], NEXT_APP_DIR);
-      }
-    } catch {}
-
     // Set up environment variables
     process.env.VERCEL_ENV = 'production';
     process.env.VERCEL_URL =
@@ -123,38 +68,11 @@ describe('Next.js Turbo Redis Cache Integration', () => {
     process.env.REDISPORT = process.env.REDISPORT || '6379';
     process.env.NEXT_START_PORT = String(NEXT_START_PORT);
 
-    if (process.env.SKIP_BUILD === 'true') {
-      console.log('skipping build');
-    } else {
-      // Build Next.js app first
-      await runCommand('pnpm', ['i'], NEXT_APP_DIR);
-      console.log('pnpm i done');
-      await runCommand('pnpm', ['build'], NEXT_APP_DIR);
-      console.log('pnpm build done');
-    }
-
-    // Start Next.js app
-    nextProcess = spawn(
-      'npx',
-      ['next', 'start', '-p', String(NEXT_START_PORT)],
-      {
-        cwd: NEXT_APP_DIR,
-        env: {
-          ...process.env,
-        },
-        stdio: 'pipe',
-      },
-    );
-    if (process.env.DEBUG_INTEGRATION) {
-      nextProcess.stdout.on('data', (data) => {
-        console.log(`stdout: ${data}`);
-      });
-    }
-
-    nextProcess.stderr.on('data', (data) => {
-      console.error(`stderr: ${data}`);
+    nextFixture = await startNextFixture({
+      appDir: NEXT_APP_DIR,
+      ports: [NEXT_START_PORT],
+      readyPath: '/api/cached-static-fetch',
     });
-    await waitForServer(NEXT_START_URL);
     console.log('next start successful');
 
     // Connect to Redis
@@ -167,11 +85,7 @@ describe('Next.js Turbo Redis Cache Integration', () => {
   }, 60_000);
 
   afterAll(async () => {
-    if (process.env.KEEP_SERVER_RUNNING === 'true') {
-      console.log('keeping server running');
-    } else {
-      if (nextProcess) nextProcess.kill();
-    }
+    await nextFixture?.stop();
     if (redisClient) await redisClient.quit();
   });
 
