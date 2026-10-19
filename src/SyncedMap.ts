@@ -32,6 +32,18 @@ export type SyncMessage<V> = {
 };
 
 const SYNC_CHANNEL_SUFFIX = ':sync-channel:';
+
+/** KEYS[1] is the hash, KEYS[i + 1] is the cache key of field ARGV[i]. */
+const DELETE_FIELDS_WITHOUT_KEY = `
+local removed = {}
+for i, field in ipairs(ARGV) do
+  if redis.call('EXISTS', KEYS[i + 1]) == 0 then
+    redis.call('HDEL', KEYS[1], field)
+    removed[#removed + 1] = field
+  end
+end
+return removed
+`;
 const READY_TIMEOUT_MS = 30_000;
 
 type ReadyWaiter = {
@@ -220,42 +232,32 @@ export class SyncedMap<V> {
     }
   }
 
+  /**
+   * Removes fields whose cache key is gone from Redis. The script checks and
+   * deletes in one step, so a key that a writer stores during the cleanup
+   * keeps its field. Only keys of the local snapshot are checked, so the cost
+   * follows the map size, not the size of the keyspace.
+   */
   private async cleanupKeysNotInRedis() {
-    // Same uint64 cursor issue as initialSync(); sendCommand until redis ^5.
-    let cursor = '0';
-    let remoteKeys: string[] = [];
+    const fields = [...this.map.keys()].filter((key) => this.filterKeys(key));
     try {
-      do {
-        const [nextCursor, keys] = (await redisErrorHandler(
-          'SyncedMap.cleanupKeysNotInRedis(), operation: SCAN ' +
-            this.keyPrefix,
-          this.client.sendCommand([
-            'SCAN',
-            cursor,
-            'MATCH',
-            `${this.keyPrefix}*`,
-            'COUNT',
-            String(this.querySize),
-          ]),
-        )) as [string, string[]];
-        remoteKeys = remoteKeys.concat(keys);
-        cursor = nextCursor;
-      } while (cursor !== '0');
-
-      const remoteKeysSet = new Set(
-        remoteKeys.map((key) => key.substring(this.keyPrefix.length)),
-      );
-
-      const keysToDelete: string[] = [];
-      for (const key of this.map.keys()) {
-        const keyStr = key as unknown as string;
-        if (!remoteKeysSet.has(keyStr) && this.filterKeys(keyStr)) {
-          keysToDelete.push(keyStr);
-        }
-      }
-
-      if (keysToDelete.length > 0) {
-        await this.delete(keysToDelete);
+      for (let i = 0; i < fields.length; i += this.querySize) {
+        const batch = fields.slice(i, i + this.querySize);
+        const removed = (await redisErrorHandler(
+          'SyncedMap.cleanupKeysNotInRedis(), operation: EVAL ' +
+            this.keyPrefix +
+            this.redisKey,
+          this.client.eval(DELETE_FIELDS_WITHOUT_KEY, {
+            keys: [
+              this.keyPrefix + this.redisKey,
+              ...batch.map((field) => this.keyPrefix + field),
+            ],
+            arguments: batch,
+          }),
+        )) as string[];
+        if (removed.length === 0) continue;
+        for (const key of removed) this.map.delete(key);
+        await this.publishDeletion(removed);
       }
     } catch (error) {
       console.error('Error during cleanup of keys not in Redis:', error);
@@ -596,24 +598,7 @@ export class SyncedMap<V> {
     }
 
     if (!withoutSyncMessage) {
-      const deletionMessage: SyncMessage<V> = {
-        type: 'delete',
-        keys: keysArray,
-      };
-      operations.push(
-        redisErrorHandler(
-          'SyncedMap.delete(), operation: publish ' +
-            this.syncChannel +
-            ' ' +
-            this.keyPrefix +
-            ' ' +
-            keysArray,
-          this.client.publish(
-            this.syncChannel,
-            JSON.stringify(deletionMessage),
-          ),
-        ),
-      );
+      operations.push(this.publishDeletion(keysArray));
     }
 
     await Promise.all(operations);
@@ -622,6 +607,19 @@ export class SyncedMap<V> {
       this.redisKey,
       keys,
       operations.length,
+    );
+  }
+
+  private async publishDeletion(keys: string[]): Promise<void> {
+    const deletionMessage: SyncMessage<V> = { type: 'delete', keys };
+    await redisErrorHandler(
+      'SyncedMap.delete(), operation: publish ' +
+        this.syncChannel +
+        ' ' +
+        this.keyPrefix +
+        ' ' +
+        keys,
+      this.client.publish(this.syncChannel, JSON.stringify(deletionMessage)),
     );
   }
 

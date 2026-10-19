@@ -767,9 +767,9 @@ export default class RedisStringsHandler {
         return;
       }
 
+      const tags = [...(ctx.tags || [])];
       if (data?.kind === 'APP_PAGE' || data?.kind === 'APP_ROUTE') {
-        const tags = data.headers['x-next-cache-tags']?.split(',');
-        ctx.tags = [...(ctx.tags || []), ...(tags || [])];
+        tags.push(...(data.headers['x-next-cache-tags']?.split(',') || []));
       }
 
       // Pages Router entries (PAGES, REDIRECT and null/notFound results) do not
@@ -778,15 +778,13 @@ export default class RedisStringsHandler {
       // invalidates them the same way as App Router entries.
       if (data === null || data.kind === 'PAGES' || data.kind === 'REDIRECT') {
         const implicitTag = NEXT_CACHE_IMPLICIT_TAG_ID + getRoutePath(key);
-        if (!ctx.tags?.includes(implicitTag)) {
-          ctx.tags = [...(ctx.tags || []), implicitTag];
-        }
+        if (!tags.includes(implicitTag)) tags.push(implicitTag);
       }
 
       // Constructing and serializing the value for storing it in redis
       const cacheEntry: CacheEntry = {
         lastModified: Date.now(),
-        tags: ctx?.tags || [],
+        tags,
         value: data,
         cacheControl: ctx.cacheControl,
       };
@@ -844,32 +842,20 @@ export default class RedisStringsHandler {
         expireAt,
       );
 
-      // Setting the tags for the cache entry in the sharedTagsMap (locally stored hashmap synced via redis)
-      // An untagged write intentionally leaves an existing association in
-      // place. The local map can lag behind another instance's tagged write,
-      // so deleting here could remove that instance's fresh association and
-      // make its value impossible to invalidate. A stale association only
-      // costs one extra cache miss on a later revalidateTag().
-      //
-      // A tagged write always stores its association, even when the local map
-      // already shows the same tags. That map can lag behind another instance
-      // that stored different tags for this key. Skipping the write would leave
-      // the shared hash pointing at those other tags, and revalidateTag() would
-      // never find this value. A later full sync reads the same hash, so it
-      // cannot repair the miss.
-      let setTagsOperation: Promise<void> | undefined;
-      if (ctx.tags && ctx.tags.length > 0) {
-        setTagsOperation = this.sharedTagsMap.set(
-          key,
-          structuredClone(ctx.tags) as string[],
-        );
-      }
+      // Write the tag membership after every successful SET, also when the
+      // tags did not change. The orphan cleanup of another instance can remove
+      // the field between a SET and this write, so each write heals it. An
+      // untagged entry removes the membership of the entry it replaces.
+      const setTagsOperation = setOperation.then(() => {
+        if (tags.length > 0) return this.sharedTagsMap.set(key, tags);
+        if (this.sharedTagsMap.has(key)) return this.sharedTagsMap.delete(key);
+      });
 
       debug(
         'blue',
         'RedisStringsHandler.set() will set the following sharedTagsMap',
         key,
-        ctx.tags as string[],
+        tags,
       );
 
       await untilDeadline(
