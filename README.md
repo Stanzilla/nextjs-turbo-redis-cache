@@ -395,7 +395,9 @@ Instance 2: served get A → 1     (should already be deleted)
 Instance 1: served delete A
 ```
 
-When `revalidateTag` / `updateTags` runs, it also deletes the affected keys from the `inMemoryDeduplicationCache` and broadcasts this deletion via Pub/Sub. So the consistency window is bounded by the Pub/Sub propagation time (typically 5–100ms), not the full `inMemoryCachingTime`. Only if the Pub/Sub message is lost would the stale entry persist for the full caching duration.
+When `revalidateTag` runs, it also deletes the affected keys from the `inMemoryDeduplicationCache` and broadcasts this deletion via Pub/Sub. So the consistency window is bounded by the Pub/Sub propagation time (typically 5–100ms), not the full `inMemoryCachingTime`. Only if the Pub/Sub message is lost would the stale entry persist for the full caching duration.
+
+For Cache Components, `updateTags` does not delete keys from the `inMemoryDeduplicationCache`. It writes the tag manifest, which is synced via Pub/Sub. Each `get()` checks the tags of the entry against this manifest, also when the value comes from the in-memory cache. So the same Pub/Sub propagation window applies.
 
 #### Practical impact
 
