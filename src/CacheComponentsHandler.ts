@@ -485,9 +485,9 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         throw jsonError;
       }
 
-      if (this.redisGetDeduplication) {
-        this.redisDeduplicationHandler.seedRequestReturn(cacheKey, serialized);
-      }
+      const seed = this.redisGetDeduplication
+        ? this.redisDeduplicationHandler.seedRequestReturn(cacheKey, serialized)
+        : undefined;
 
       // expire is already a duration in seconds, use it directly
       const ttlSeconds =
@@ -507,6 +507,12 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
           ...(ttlSeconds ? { EX: ttlSeconds } : {}),
         }),
       );
+      // Redis did not store the value, so reads must not get it from the seed.
+      if (seed) {
+        setOperation.catch(() =>
+          this.redisDeduplicationHandler.forget(cacheKey, seed),
+        );
+      }
 
       let tagsOperation: Promise<void> | undefined;
       const tags = stored.tags || [];

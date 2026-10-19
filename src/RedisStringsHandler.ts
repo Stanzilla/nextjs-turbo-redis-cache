@@ -776,12 +776,12 @@ export default class RedisStringsHandler {
       // pre seed data into deduplicated get client. This will reduce redis load by not requesting
       // the same value from redis which was just set. It also replaces a cached miss, so that reads
       // on this instance during the redis SET do not return the old result.
-      if (this.redisGetDeduplication) {
-        this.redisDeduplicationHandler.seedRequestReturn(
-          key,
-          serializedCacheEntry,
-        );
-      }
+      const seed = this.redisGetDeduplication
+        ? this.redisDeduplicationHandler.seedRequestReturn(
+            key,
+            serializedCacheEntry,
+          )
+        : undefined;
 
       const expireAt = resolveCacheEntryTtlSeconds(ctx, data, {
         estimateExpireAge: this.estimateExpireAge,
@@ -798,6 +798,12 @@ export default class RedisStringsHandler {
           ...(expireAt ? { EX: expireAt } : {}),
         }),
       );
+      // Redis did not store the value, so reads must not get it from the seed.
+      if (seed) {
+        setOperation.catch(() =>
+          this.redisDeduplicationHandler.forget(key, seed),
+        );
+      }
 
       // When the new value is in redis, remove the old copy from the in-memory deduplication cache
       // of every instance. Otherwise the other instances serve the old value for up to inMemoryCachingTime.
