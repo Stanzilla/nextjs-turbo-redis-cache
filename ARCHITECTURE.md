@@ -230,7 +230,7 @@ flowchart TD
 
     D --> CC{CacheComponents?}
     CC -->|Yes| EXP{"entry.expire TTL elapsed?"}
-    EXP -->|Yes| DEL1["UNLINK key\nDelete from sharedTagsMap\nReturn undefined"]
+    EXP -->|Yes| DEL1["UNLINK key if unchanged\nReturn undefined"]
     EXP -->|No| TAGX{"areTagsExpired(entry.tags)?"}
     TAGX -->|Yes| DEL1
     TAGX -->|No| TAGS{"areTagsStale(entry.tags)?"}
@@ -326,13 +326,13 @@ flowchart TD
 
 1. **Tag extraction** (RedisStringsHandler): For `APP_PAGE` and `APP_ROUTE`, tags are encoded in the `x-next-cache-tags` header as a comma-separated string. The handler splits this and merges with `ctx.tags`.
 
-2. **Tag deduplication**: Before writing to `sharedTagsMap`, both handlers check if the current tags are identical to the already stored tags. If so, the write is skipped to reduce Redis operations.
+2. **Tag index** (RedisStringsHandler): After the Redis `SET` succeeds, the handler writes the tags of the key to `sharedTagsMap`. CacheComponentsHandler keeps no tag index, because `get()` checks the tags stored in each entry against `revalidatedTagsMap`.
 
 3. **Dedup cache seeding** (both handlers): The serialized value is immediately seeded into the `DeduplicatedRequestHandler`, so a following `get()` for the same key can be served from memory.
 
 4. **Stream handling** (CacheComponentsHandler): The `ReadableStream` from Next.js is tee'd – one branch is consumed to produce the stored base64 value, while the original stream is left intact for Next.js to continue using.
 
-5. **Parallel operations**: The Redis `SET` and the `sharedTagsMap.set()` run concurrently via `Promise.all`.
+5. **Peer invalidation**: After the Redis `SET` succeeds, both handlers delete the key from `inMemoryDeduplicationCache` on every instance, so peers do not serve the old value or a cached miss.
 
 ---
 
@@ -450,7 +450,7 @@ flowchart LR
     subgraph "Both Handlers"
         direction TB
         A["Redis Strings\n(actual cache data)"]
-        B["sharedTagsMap\n(key → tags)"]
+        B["sharedTagsMap\n(key → tags, ISR only)"]
         C["revalidatedTagsMap\n(tag → timestamp)"]
         D["inMemoryDeduplicationCache\n(key → Promise)"]
     end
@@ -463,8 +463,8 @@ flowchart LR
     GET -.->|"ISR: check staleness"| C
     EXP["getExpiration()"] -->|"CC: timestamp now"| C
     REV["revalidateTag()\nupdateTags()"] --> C
-    REV -->|"evict"| D
+    REV -->|"ISR: evict"| D
     GET -->|"expired + same value: UNLINK"| A
 ```
 
-Both handlers rely on `SyncedMap` for cross-instance consistency of the tag maps and use the same pattern of "find affected keys via `sharedTagsMap` → batch delete from Redis → clean up maps". Both also use `DeduplicatedRequestHandler` (enabled by default) to reduce Redis load by deduplicating concurrent `get()` calls for the same key and seeding the cache on `set()`.
+Both handlers rely on `SyncedMap` for cross-instance consistency of the tag maps. `RedisStringsHandler` finds affected keys via `sharedTagsMap`, batch-deletes them from Redis and cleans up the maps. `CacheComponentsHandler` has no `sharedTagsMap`: it writes the tag manifest only, and `get()` checks every entry, also one from the in-memory cache, against it. Versions before this change wrote a `__cacheComponents_sharedTags__` hash. Nothing reads it now, so you can delete it from Redis. Both also use `DeduplicatedRequestHandler` (enabled by default) to reduce Redis load by deduplicating concurrent `get()` calls for the same key and seeding the cache on `set()`.

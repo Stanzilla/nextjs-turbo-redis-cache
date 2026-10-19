@@ -65,6 +65,17 @@ vi.mock('redis', () => {
       }
       throw new Error(`Unexpected sendCommand: ${command}`);
     }),
+    eval: vi.fn(
+      async (
+        _script: string,
+        options: { keys: string[]; arguments: string[] },
+      ) => {
+        const [key] = options.keys;
+        if (hoisted.store.get(key) !== options.arguments[0]) return 0;
+        hoisted.store.delete(key);
+        return 1;
+      },
+    ),
     hSet: vi.fn(async () => 1),
     hDel: vi.fn(async () => 1),
   });
@@ -273,12 +284,12 @@ describe('Cache Components in-memory read cache across instances', () => {
 
   type Handler = Awaited<ReturnType<typeof createCacheComponentsInstance>>;
 
-  function write(handler: Handler, text: string) {
+  function write(handler: Handler, text: string, tags: string[] = []) {
     return handler.set(
       KEY,
       Promise.resolve({
         value: new Blob([text]).stream(),
-        tags: [],
+        tags,
         stale: 60,
         timestamp: Date.now(),
         expire: 600,
@@ -314,5 +325,18 @@ describe('Cache Components in-memory read cache across instances', () => {
     await write(writer, 'v1');
 
     expect(await read(reader)).toBe('v1');
+  });
+
+  it('does not serve an in-memory copy on another instance after updateTags()', async () => {
+    const writer = await createCacheComponentsInstance();
+    const reader = await createCacheComponentsInstance();
+    await write(writer, 'v1', ['posts']);
+    expect(await read(reader)).toBe('v1');
+
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await writer.updateTags(['posts']);
+
+    expect(await read(reader)).toBeNull();
+    expect(hoisted.store.has('test:' + KEY)).toBe(false);
   });
 });
