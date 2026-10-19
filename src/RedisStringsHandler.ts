@@ -4,13 +4,18 @@ import { DeduplicatedRequestHandler } from './DeduplicatedRequestHandler';
 import { debug } from './utils/debug';
 import { CacheValueSerializer, jsonCacheValueSerializer } from './serializer';
 import { resolveCacheEntryTtlSeconds } from './utils/cacheTtl';
-import { shouldDeferRedisConnection } from './utils/redisConnection';
+import {
+  type Client,
+  redisErrorHandler,
+  shouldDeferRedisConnection,
+} from './utils/redisConnection';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
 import { compareAndUnlink } from './utils/compareAndUnlink';
 import { parseEnvInt } from './utils/env';
 
-export type Client = ReturnType<typeof createClient>;
+// Re-exported for imports that used this module before.
+export { type Client, redisErrorHandler };
 
 export type CacheControl = {
   revalidate: number | false;
@@ -104,23 +109,6 @@ export type SetCacheValue =
       revalidate: number | false;
     }
   | null;
-
-export function redisErrorHandler<T extends Promise<unknown>>(
-  debugInfo: string,
-  redisCommandResult: T,
-): T {
-  const beforeTimestamp = performance.now();
-  return redisCommandResult.catch((error) => {
-    console.error(
-      'Redis command error',
-      (performance.now() - beforeTimestamp).toFixed(2),
-      'ms',
-      debugInfo,
-      error,
-    );
-    throw error;
-  }) as T;
-}
 
 if (process.env.DEBUG_CACHE_HANDLER) {
   // This is a test to check if the event loop is lagging. If it lags, increase CPU of container.
