@@ -22,6 +22,7 @@ import {
   persistableTagManifest,
   type TagManifestEntry,
 } from './utils/tagRevalidation';
+import { parseEnvInt } from './utils/env';
 
 export interface CacheComponentsEntry {
   value: ReadableStream<Uint8Array>;
@@ -129,22 +130,20 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         : 'redis://localhost:6379',
     database = process.env.VERCEL_ENV === 'production' ? 0 : 1,
     keyPrefix,
-    getTimeoutMs = process.env.REDIS_COMMAND_TIMEOUT_MS
-      ? (Number.parseInt(process.env.REDIS_COMMAND_TIMEOUT_MS) ?? 500)
-      : 500,
-    writeTimeoutMs = process.env.REDIS_WRITE_TIMEOUT_MS
-      ? Number.parseInt(process.env.REDIS_WRITE_TIMEOUT_MS) || getTimeoutMs
-      : getTimeoutMs,
+    getTimeoutMs = parseEnvInt('REDIS_COMMAND_TIMEOUT_MS', 500, { min: 1 }),
+    writeTimeoutMs = parseEnvInt('REDIS_WRITE_TIMEOUT_MS', getTimeoutMs, {
+      min: 1,
+    }),
     revalidateTagQuerySize = 250,
     avgResyncIntervalMs = 60 * 60 * 1_000,
     redisGetDeduplication = true,
     inMemoryCachingTime = 10_000,
     socketOptions,
     clientOptions,
-    killContainerOnErrorThreshold = process.env
-      .KILL_CONTAINER_ON_ERROR_THRESHOLD
-      ? (Number.parseInt(process.env.KILL_CONTAINER_ON_ERROR_THRESHOLD) ?? 0)
-      : 0,
+    killContainerOnErrorThreshold = parseEnvInt(
+      'KILL_CONTAINER_ON_ERROR_THRESHOLD',
+      0,
+    ),
     serverDistDir,
   }: CreateCacheComponentsHandlerOptions) {
     try {
