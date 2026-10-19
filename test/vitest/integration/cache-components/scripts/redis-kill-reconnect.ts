@@ -1,51 +1,19 @@
-import { spawnSync } from 'child_process';
+import {
+  detectContainerRuntime,
+  getFreePort,
+  sh,
+  sleep,
+  startRedis,
+  waitUntil,
+} from './redis-test-helpers';
 
-type ContainerRuntime = 'podman' | 'docker';
-
-function sh(cmd: string, args: string[], opts: { timeoutMs?: number } = {}) {
-  const res = spawnSync(cmd, args, {
-    encoding: 'utf8',
-    timeout: opts.timeoutMs ?? 30_000,
-  });
-  if (res.error) throw res.error;
-  return {
-    code: res.status ?? -1,
-    stdout: res.stdout ?? '',
-    stderr: res.stderr ?? '',
-  };
-}
-
-function canRun(cmd: string) {
-  const res = spawnSync(cmd, ['--version'], {
-    encoding: 'utf8',
-    timeout: 3_000,
-  });
-  return !res.error && (res.status ?? 1) === 0;
-}
-
-function detectContainerRuntime(): ContainerRuntime {
-  if (process.env.CONTAINER_RUNTIME === 'podman') return 'podman';
-  if (process.env.CONTAINER_RUNTIME === 'docker') return 'docker';
-
-  if (canRun('podman')) return 'podman';
-  if (canRun('docker')) return 'docker';
-
-  throw new Error(
-    'Neither podman nor docker is available. Install one of them or set CONTAINER_RUNTIME.',
-  );
-}
-
-async function sleep(ms: number) {
-  await new Promise((r) => setTimeout(r, ms));
-}
-
-async function waitUntil(fn: () => Promise<boolean>, timeoutMs = 20_000) {
-  const start = Date.now();
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    if (await fn()) return;
-    if (Date.now() - start > timeoutMs) throw new Error('waitUntil timeout');
-    await sleep(200);
+async function waitOrThrow(
+  what: string,
+  fn: () => Promise<boolean>,
+  timeoutMs: number,
+) {
+  if (!(await waitUntil(fn, timeoutMs))) {
+    throw new Error(`timed out waiting for ${what}`);
   }
 }
 
@@ -53,44 +21,13 @@ async function main() {
   const runtime = detectContainerRuntime();
   const name = `redis-e2e-${Math.random().toString(36).slice(2, 8)}`;
 
-  // Pick a free localhost port
-  const net = await import('net');
-  const port: number = await new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address();
-      if (!addr || typeof addr === 'string')
-        return reject(new Error('bad addr'));
-      const p = addr.port;
-      srv.close(() => resolve(p));
-    });
-  });
+  const port = await getFreePort();
 
   // cleanup
   sh(runtime, ['rm', '-f', name]);
 
   // Start redis with keyspace notifications enabled (required by SyncedMap)
-  {
-    const r = sh(
-      runtime,
-      [
-        'run',
-        '-d',
-        '--rm',
-        '--name',
-        name,
-        '-p',
-        `${port}:6379`,
-        'docker.io/redis:7-alpine',
-        'redis-server',
-        '--notify-keyspace-events',
-        'Exe',
-      ],
-      { timeoutMs: 60_000 },
-    );
-    if (r.code !== 0) throw new Error(`podman run failed: ${r.stderr}`);
-  }
+  startRedis(runtime, name, port);
 
   // Set env BEFORE importing in case any module-level code reads REDIS_URL.
   // (With lazy init the singleton is no longer created at import time, but
@@ -120,7 +57,11 @@ async function main() {
     isReady: boolean;
   };
 
-  await waitUntil(async () => cacheComponentsClient.isReady, 20_000);
+  await waitOrThrow(
+    'cache components client ready',
+    async () => cacheComponentsClient.isReady,
+    20_000,
+  );
   if ((await cacheComponentsClient.ping()) !== 'PONG') {
     throw new Error('expected PONG (cache components)');
   }
@@ -141,7 +82,11 @@ async function main() {
     isReady: boolean;
   };
 
-  await waitUntil(async () => regularClient.isReady, 20_000);
+  await waitOrThrow(
+    'regular client ready',
+    async () => regularClient.isReady,
+    20_000,
+  );
   if ((await regularClient.ping()) !== 'PONG') {
     throw new Error('expected PONG (regular handler)');
   }
@@ -178,44 +123,32 @@ async function main() {
 
   // Wait a bit, then start again
   await sleep(500);
-
-  {
-    const r = sh(
-      runtime,
-      [
-        'run',
-        '-d',
-        '--rm',
-        '--name',
-        name,
-        '-p',
-        `${port}:6379`,
-        'docker.io/redis:7-alpine',
-        'redis-server',
-        '--notify-keyspace-events',
-        'Exe',
-      ],
-      { timeoutMs: 60_000 },
-    );
-    if (r.code !== 0) throw new Error(`${runtime} run2 failed: ${r.stderr}`);
-  }
+  startRedis(runtime, name, port);
 
   // Should recover (both)
-  await waitUntil(async () => {
-    try {
-      return (await cacheComponentsClient.ping()) === 'PONG';
-    } catch {
-      return false;
-    }
-  }, 30_000);
+  await waitOrThrow(
+    'cache components client recovery',
+    async () => {
+      try {
+        return (await cacheComponentsClient.ping()) === 'PONG';
+      } catch {
+        return false;
+      }
+    },
+    30_000,
+  );
 
-  await waitUntil(async () => {
-    try {
-      return (await regularClient.ping()) === 'PONG';
-    } catch {
-      return false;
-    }
-  }, 30_000);
+  await waitOrThrow(
+    'regular client recovery',
+    async () => {
+      try {
+        return (await regularClient.ping()) === 'PONG';
+      } catch {
+        return false;
+      }
+    },
+    30_000,
+  );
 
   // Shut down clients before cleaning up Redis, otherwise reconnect loops keep the process alive.
   try {
