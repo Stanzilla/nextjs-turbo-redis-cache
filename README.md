@@ -375,7 +375,7 @@ In practice, most deployments run multiple application instances, which introduc
 
 #### Source 1: SyncedMap Pub/Sub propagation (both handlers)
 
-Both `RedisStringsHandler` and `CacheComponentsHandler` maintain in-memory maps (`sharedTagsMap`, `revalidatedTagsMap`) that are synchronized across instances via Redis Pub/Sub (see [SyncedMap in ARCHITECTURE.md](./ARCHITECTURE.md#syncedmap--the-synchronization-primitive)). When a tag is revalidated on instance 1, the Pub/Sub message must propagate to instance 2 before its local maps reflect the change. Until the message arrives, `get()` on instance 2 may still consider a cache entry valid.
+`RedisStringsHandler` maintains `sharedTagsMap` and `revalidatedTagsMap`, and `CacheComponentsHandler` maintains `revalidatedTagsMap`. These in-memory maps are synchronized across instances via Redis Pub/Sub (see [SyncedMap in ARCHITECTURE.md](./ARCHITECTURE.md#syncedmap--the-synchronization-primitive)). When a tag is revalidated on instance 1, the Pub/Sub message must propagate to instance 2 before its local maps reflect the change. Until the message arrives, `get()` on instance 2 may still consider a cache entry valid.
 
 This is especially relevant for **implicit tags** (`_N_T_` prefix): when `revalidatePath("/products")` is called, the handler records a timestamp in `revalidatedTagsMap` and lazily invalidates nested fetch entries on the next `get()`. If another instance hasn't received the Pub/Sub update yet, it can serve a stale fetch result.
 
