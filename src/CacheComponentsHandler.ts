@@ -514,6 +514,13 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         );
       }
 
+      // When the new value is in Redis, remove the old copy and any cached
+      // miss from the in-memory cache of every instance. Also when this
+      // instance has the cache off, because other instances can have it on.
+      const invalidateDeduplicationCacheOperation = setOperation.then(() =>
+        this.inMemoryDeduplicationCache.delete(cacheKey),
+      );
+
       let tagsOperation: Promise<void> | undefined;
       const tags = stored.tags || [];
       if (tags.length > 0) {
@@ -529,7 +536,11 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       }
 
       await untilDeadline(
-        Promise.all([setOperation, tagsOperation]),
+        Promise.all([
+          setOperation,
+          tagsOperation,
+          invalidateDeduplicationCacheOperation,
+        ]),
         AbortSignal.timeout(this.writeTimeoutMs),
       );
     } catch (error) {
