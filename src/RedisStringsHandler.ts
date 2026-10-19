@@ -8,6 +8,7 @@ import { shouldDeferRedisConnection } from './utils/redisConnection';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
 import { compareAndUnlink } from './utils/compareAndUnlink';
+import { parseEnvInt } from './utils/env';
 
 export type Client = ReturnType<typeof createClient>;
 
@@ -122,7 +123,8 @@ export function redisErrorHandler<T extends Promise<unknown>>(
 }
 
 if (process.env.DEBUG_CACHE_HANDLER) {
-  // This is a test to check if the event loop is lagging. If it lags, increase CPU of container
+  // This is a test to check if the event loop is lagging. If it lags, increase CPU of container.
+  // unref() so that this probe does not keep the process alive.
   setInterval(() => {
     const start = performance.now();
     setImmediate(() => {
@@ -134,7 +136,7 @@ if (process.env.DEBUG_CACHE_HANDLER) {
         );
       }
     });
-  }, 500);
+  }, 500).unref();
 }
 
 export type CreateRedisStringsHandlerOptions = {
@@ -298,12 +300,10 @@ export default class RedisStringsHandler {
       process.env.VERCEL_URL ||
       'UNDEFINED_URL_',
     sharedTagsKey = '__sharedTags__',
-    getTimeoutMs = process.env.REDIS_COMMAND_TIMEOUT_MS
-      ? (Number.parseInt(process.env.REDIS_COMMAND_TIMEOUT_MS) ?? 500)
-      : 500,
-    writeTimeoutMs = process.env.REDIS_WRITE_TIMEOUT_MS
-      ? Number.parseInt(process.env.REDIS_WRITE_TIMEOUT_MS) || getTimeoutMs
-      : getTimeoutMs,
+    getTimeoutMs = parseEnvInt('REDIS_COMMAND_TIMEOUT_MS', 500, { min: 1 }),
+    writeTimeoutMs = parseEnvInt('REDIS_WRITE_TIMEOUT_MS', getTimeoutMs, {
+      min: 1,
+    }),
     revalidateTagQuerySize = 250,
     avgResyncIntervalMs = 60 * 60 * 1_000,
     redisGetDeduplication = true,
@@ -311,10 +311,10 @@ export default class RedisStringsHandler {
     defaultStaleAge = 60 * 60 * 24 * 14,
     estimateExpireAge = (staleAge) =>
       process.env.VERCEL_ENV === 'production' ? staleAge * 2 : staleAge * 1.2,
-    killContainerOnErrorThreshold = process.env
-      .KILL_CONTAINER_ON_ERROR_THRESHOLD
-      ? (Number.parseInt(process.env.KILL_CONTAINER_ON_ERROR_THRESHOLD) ?? 0)
-      : 0,
+    killContainerOnErrorThreshold = parseEnvInt(
+      'KILL_CONTAINER_ON_ERROR_THRESHOLD',
+      0,
+    ),
     socketOptions,
     clientOptions,
     valueSerializer = jsonCacheValueSerializer,
