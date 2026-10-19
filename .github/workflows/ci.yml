@@ -118,11 +118,8 @@ jobs:
         if: matrix.redis-client != 'from lockfile'
         run: pnpm add -D redis@${{ matrix.redis-client }} --ignore-scripts
 
-      - name: Start Redis
-        uses: supercharge/redis-github-action@1.8.0
-        with:
-          redis-version: '7'
-          redis-port: 6379
+      - name: Setup Redis
+        uses: ./.github/actions/setup-redis
 
       - name: Run Lua script tests
         run: pnpm test:integration:redis-scripts
@@ -157,17 +154,8 @@ jobs:
       - name: Build project
         run: pnpm build
 
-      - name: Start Redis
-        uses: supercharge/redis-github-action@1.8.0
-        with:
-          redis-version: '7'
-          redis-port: 6379
-
-      - name: Install redis-cli
-        run: sudo apt-get update && sudo apt-get install -y redis-tools
-
-      - name: Configure Redis Keyspace Notifications
-        run: redis-cli config set notify-keyspace-events Exe
+      - name: Setup Redis
+        uses: ./.github/actions/setup-redis
 
       - name: Install test project
         run: cd test/nextjs-test-projects/${{ matrix.next-test-app }} && pnpm install
@@ -209,17 +197,8 @@ jobs:
       - name: Build project
         run: pnpm build
 
-      - name: Start Redis
-        uses: supercharge/redis-github-action@1.8.0
-        with:
-          redis-version: '7'
-          redis-port: 6379
-
-      - name: Install redis-cli
-        run: sudo apt-get update && sudo apt-get install -y redis-tools
-
-      - name: Configure Redis Keyspace Notifications
-        run: redis-cli config set notify-keyspace-events Exe
+      - name: Setup Redis
+        uses: ./.github/actions/setup-redis
 
       - name: Install test project
         run: cd test/nextjs-test-projects/${{ matrix.pages-test-app }} && pnpm install
@@ -255,17 +234,8 @@ jobs:
       - name: Build project
         run: pnpm build
 
-      - name: Start Redis
-        uses: supercharge/redis-github-action@1.8.0
-        with:
-          redis-version: '7'
-          redis-port: 6379
-
-      - name: Install redis-cli
-        run: sudo apt-get update && sudo apt-get install -y redis-tools
-
-      - name: Configure Redis Keyspace Notifications
-        run: redis-cli config set notify-keyspace-events Exe
+      - name: Setup Redis
+        uses: ./.github/actions/setup-redis
 
       - name: Install test project
         run: cd test/nextjs-test-projects/next-app-15-4-11 && pnpm install
@@ -305,17 +275,8 @@ jobs:
       - name: Build project
         run: pnpm build
 
-      - name: Start Redis
-        uses: supercharge/redis-github-action@1.8.0
-        with:
-          redis-version: '7'
-          redis-port: 6379
-
-      - name: Install redis-cli
-        run: sudo apt-get update && sudo apt-get install -y redis-tools
-
-      - name: Configure Redis Keyspace Notifications
-        run: redis-cli config set notify-keyspace-events Exe
+      - name: Setup Redis
+        uses: ./.github/actions/setup-redis
 
       - name: Install test project
         run: cd test/nextjs-test-projects/${{ matrix.cache-components-app }} && pnpm install
@@ -357,17 +318,8 @@ jobs:
       - name: Build project
         run: pnpm build
 
-      - name: Start Redis
-        uses: supercharge/redis-github-action@1.8.0
-        with:
-          redis-version: '7'
-          redis-port: 6379
-
-      - name: Install redis-cli
-        run: sudo apt-get update && sudo apt-get install -y redis-tools
-
-      - name: Configure Redis Keyspace Notifications
-        run: redis-cli config set notify-keyspace-events Exe
+      - name: Setup Redis
+        uses: ./.github/actions/setup-redis
 
       - name: Install test project
         run: cd test/nextjs-test-projects/${{ matrix.cache-components-app }} && pnpm install
