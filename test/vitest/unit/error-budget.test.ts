@@ -8,6 +8,8 @@ type MockClient = {
   disconnect: ReturnType<typeof vi.fn>;
 };
 
+const failures = vi.hoisted(() => ({ syncedMapConstructor: false }));
+
 vi.mock('redis', () => ({
   createClient: vi.fn(() => {
     const listeners = new Map<string, ((...args: unknown[]) => void)[]>();
@@ -37,6 +39,9 @@ vi.mock('../../../src/SyncedMap', () => {
     set = vi.fn(async () => undefined);
     delete = vi.fn(async () => undefined);
     entries = vi.fn(function* () {});
+    constructor() {
+      if (failures.syncedMapConstructor) throw new Error('setup failed');
+    }
   }
   return { SyncedMap };
 });
@@ -86,6 +91,7 @@ describe.each([
   });
 
   afterEach(() => {
+    failures.syncedMapConstructor = false;
     vi.useRealTimers();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
@@ -127,5 +133,25 @@ describe.each([
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(exit).not.toHaveBeenCalled();
+  });
+
+  it('counts constructor failures across instances and closes each client', async () => {
+    const { createClient } = await import('redis');
+    vi.mocked(createClient).mockClear();
+    failures.syncedMapConstructor = true;
+
+    for (let i = 0; i < threshold; i++) {
+      await expect(create()).rejects.toThrow('setup failed');
+    }
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(exit).toHaveBeenCalledTimes(1);
+    const clients = vi
+      .mocked(createClient)
+      .mock.results.map((result) => result.value as MockClient);
+    expect(clients).toHaveLength(threshold);
+    for (const client of clients) {
+      expect(client.disconnect).toHaveBeenCalled();
+    }
   });
 });

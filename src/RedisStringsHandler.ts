@@ -10,7 +10,11 @@ import {
   redisErrorHandler,
   shouldDeferRedisConnection,
 } from './utils/redisConnection';
-import { ErrorBudget, disconnectAndExit } from './utils/errorBudget';
+import {
+  ErrorBudget,
+  closeClient,
+  disconnectAndExit,
+} from './utils/errorBudget';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
 import { compareAndUnlink } from './utils/compareAndUnlink';
@@ -238,6 +242,10 @@ function getRoutePath(key: string): string {
 // This helps track when specific tags were last invalidated
 const REVALIDATED_TAGS_KEY = '__revalidated_tags__';
 
+// The caller creates a new handler after a constructor failure, so these
+// failures need one count across instances.
+let constructorErrorBudget: ErrorBudget | undefined;
+
 // Cache kinds this handler is designed and tested for. Kept as the single
 // source of truth for both payload validation and the warning message, so
 // adding a kind is a one-line change here instead of edits scattered across
@@ -257,7 +265,8 @@ const SUPPORTED_SET_KINDS = [
 ] as const;
 
 export default class RedisStringsHandler {
-  private client: Client;
+  // Not set when createClient() throws in the constructor.
+  private client!: Client;
   private sharedTagsMap: SyncedMap<string[]>;
   private revalidatedTagsMap: SyncedMap<number>;
   private inMemoryDeduplicationCache: SyncedMap<Promise<string | null>>;
@@ -421,7 +430,12 @@ export default class RedisStringsHandler {
         this.redisDeduplicationHandler.deduplicatedFunction;
     } catch (error) {
       console.error('RedisStringsHandler constructor error', error);
-      this.errorBudget.record(error, 'RedisStringsHandler constructor');
+      closeClient(this.client);
+      constructorErrorBudget ??= new ErrorBudget(
+        killContainerOnErrorThreshold,
+        () => disconnectAndExit(undefined),
+      );
+      constructorErrorBudget.record(error, 'RedisStringsHandler constructor');
       throw error;
     }
   }
