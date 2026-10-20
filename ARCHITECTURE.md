@@ -397,6 +397,8 @@ flowchart TD
 
 1. **Implicit tags (`_N_T_` prefix)**: When Next.js calls `revalidatePath("/products")`, it internally translates this to `revalidateTag("_N_T_/products")`. The handler cannot know which _fetch_ cache keys are nested inside that page. Therefore, it only records the timestamp in `revalidatedTagsMap`. The actual cleanup happens lazily in `get()` when the fetch entry is next accessed. The handler records explicit tags too. A write that started before `revalidateTag()` can reach Redis after the `UNLINK`, and `sharedTagsMap` cannot find it then. The record makes `get()` drop such an entry.
 
+   `RedisStringsHandler.revalidateTag()` ignores the `profile` argument of Next.js 16. Each call is an immediate hard invalidation, also when the profile asks for stale-while-revalidate.
+
 2. **SWR `updateTags` (Cache Components)**: Matches Next.js `DefaultCacheHandler.updateTags()` (`default.js` in 16.0.11, 16.2.6, 16.3.0) and the [revalidateTag docs](https://nextjs.org/docs/app/api-reference/functions/revalidateTag). `revalidateTag(tag, profile)` looks up `cacheLife[profile].expire` (seconds) and calls `updateTags(tags, { expire })`. The handler never unlinks in `updateTags`:
 
    - No `durations` (`updateTag` / deprecated single-arg `revalidateTag`): `{ expired: now }` — next `get()` is a hard miss.
