@@ -22,6 +22,7 @@ vi.mock('redis', () => ({
         listeners.set(event, [...(listeners.get(event) ?? []), cb]);
       }),
       once: vi.fn(),
+      off: vi.fn(),
       emit: (event: string, ...args: unknown[]) => {
         (listeners.get(event) ?? []).forEach((cb) => cb(...args));
       },
@@ -216,7 +217,9 @@ describe.each([
     for (let i = 0; i < threshold; i++) {
       await expect(create()).rejects.toThrow('setup failed');
     }
-    await vi.advanceTimersByTimeAsync(1000);
+    // The mock client never ends its connect attempt, so closeClient()
+    // disconnects after the longest connect attempt (5 s).
+    await vi.advanceTimersByTimeAsync(5_000);
 
     expect(exit).toHaveBeenCalledTimes(1);
     const clients = vi
