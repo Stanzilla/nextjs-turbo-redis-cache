@@ -61,10 +61,31 @@ class Client {
     return [next, batch.flat()];
   }
   private scanSnapshot: [string, string][] = [];
-  async eval(_script: string, { arguments: args }: { arguments: string[] }) {
-    const removed = args.slice(1).filter((field) => !this.liveKeys.has(field));
-    for (const field of removed) this.hash.delete(field);
-    return removed;
+  async exists(key: string) {
+    return this.liveKeys.has(key.slice(PREFIX.length)) ? 1 : 0;
+  }
+  /**
+   * Emulates the take and restore scripts. Their messages are not delivered,
+   * as publish() does nothing.
+   */
+  async eval(
+    script: string,
+    { arguments: [, ...args] }: { arguments: string[] },
+  ) {
+    if (script.includes('HSETNX')) {
+      for (let i = 0; i < args.length; i += 2) {
+        if (!this.hash.has(args[i])) this.hash.set(args[i], args[i + 1]);
+      }
+      return null;
+    }
+    const taken: string[] = [];
+    for (const field of args) {
+      const value = this.hash.get(field);
+      if (value === undefined) continue;
+      this.hash.delete(field);
+      taken.push(field, value);
+    }
+    return taken;
   }
   async hSet(_key: string, field: string, value: string) {
     this.hash.set(field, value);

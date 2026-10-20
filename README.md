@@ -395,7 +395,7 @@ But depending on the setup of redis this can change:
 - Eventual consistency: In a master-replica setup (strong consistency only while there is no failover)
 - Eventual consistency: In Redis Cluster mode
 
-> Redis Cluster is not supported by this handler. It connects with a single-node client, and the orphan cleanup script uses keys in many hash slots, which a cluster rejects with `CROSSSLOT`.
+> A Redis Cluster with one shard is supported with the normal client, for example ElastiCache Serverless or one node with `cluster-enabled yes`. Each command and each script of the handler uses one key, so the cluster does not reject it with `CROSSSLOT`. Set `database: 0`, because a cluster has only database 0. A cluster with many shards needs a cluster client (`createCluster`), which this handler does not support.
 
 ### Consistency levels of the Caching Handler
 

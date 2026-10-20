@@ -71,11 +71,24 @@ class ScanCursorMockClient {
     return 1;
   }
 
+  async exists(key: string) {
+    return this.stringKeys.includes(key) ? 1 : 0;
+  }
+
+  /** Emulates the take script without the publish. Restore is a no-op. */
   async eval(
-    _script: string,
-    { keys, arguments: [, ...fields] }: { keys: string[]; arguments: string[] },
+    script: string,
+    { arguments: [, ...fields] }: { arguments: string[] },
   ) {
-    return fields.filter((_, i) => !this.stringKeys.includes(keys[i + 1]));
+    if (script.includes('HSETNX')) return null;
+    const taken: string[] = [];
+    for (const field of fields) {
+      const value = this.hash.get(field);
+      if (value === undefined) continue;
+      this.hash.delete(field);
+      taken.push(field, value);
+    }
+    return taken;
   }
 
   /**
