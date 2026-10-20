@@ -12,6 +12,14 @@ export type TagManifestEntry = {
   expired?: number;
 };
 
+/** The forms that a tag-manifest field can have in Redis. */
+export function isStoredTagManifest(
+  value: unknown,
+): value is TagManifestEntry | number {
+  if (typeof value === 'number') return Number.isFinite(value);
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
  * Read a tag-manifest field from Redis.
  *
