@@ -42,7 +42,7 @@ flowchart TB
         subgraph "In-Memory Maps"
             STM["sharedTagsMap\n(SyncedMap&lt;string[]&gt;)\ncacheKey → tags"]
             RTM["revalidatedTagsMap\n(SyncedMap&lt;number&gt;)\ntag → timestamp"]
-            DEDUP["inMemoryDeduplicationCache\n(SyncedMap&lt;Promise&gt;)"]
+            DEDUP["inMemoryDeduplicationCache\n(Map&lt;Promise&gt;)"]
         end
     end
 
@@ -192,7 +192,11 @@ sequenceDiagram
     DC->>DC: delete("key-A")
 ```
 
-The `inMemoryDeduplicationCache` itself is a `SyncedMap` configured with `withoutRedisHashmap: true` and `withoutSetSync: true` – it only uses the Pub/Sub delete channel so that revalidations on other instances can evict stale entries.
+The `inMemoryDeduplicationCache` itself is a plain local `Map`. It has no Redis hash. `syncDeduplicationCache()` connects it to a Pub/Sub delete channel on the shared subscriber of the handler, so that `set()` and revalidations on other instances can remove stale entries:
+
+- A delete message removes the given keys on each instance.
+- When the subscriber connection is lost, delete messages can be lost too. The instance clears the whole cache, and clears it again when the new subscriber listens.
+- Expired and evicted Redis keys do not remove entries. Such an entry stays for at most `inMemoryCachingTime`.
 
 ---
 

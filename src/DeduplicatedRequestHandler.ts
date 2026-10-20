@@ -1,21 +1,29 @@
 import { debugVerbose } from './utils/debug';
-import { SyncedMap } from './SyncedMap';
+import { type Client, redisErrorHandler } from './utils/redisConnection';
+import type { RedisSubscriptions } from './utils/redisSubscriptions';
+import type { SyncMessage } from './SyncedMap';
+
 export class DeduplicatedRequestHandler<
   T extends (...args: [never, never]) => Promise<K>,
   K,
 > {
-  private inMemoryDeduplicationCache: SyncedMap<Promise<K>>;
+  private inMemoryDeduplicationCache = new Map<string, Promise<K>>();
   private cachingTimeMs: number;
   private fn: T;
 
-  constructor(
-    fn: T,
-    cachingTimeMs: number,
-    inMemoryDeduplicationCache: SyncedMap<Promise<K>>,
-  ) {
+  constructor(fn: T, cachingTimeMs: number) {
     this.fn = fn;
     this.cachingTimeMs = cachingTimeMs;
-    this.inMemoryDeduplicationCache = inMemoryDeduplicationCache;
+  }
+
+  /** Removes the entries for `keys` on this instance only. */
+  invalidateLocal(keys: string[]): void {
+    for (const key of keys) this.inMemoryDeduplicationCache.delete(key);
+  }
+
+  /** Removes all entries on this instance only. */
+  clearLocal(): void {
+    this.inMemoryDeduplicationCache.clear();
   }
 
   /**
@@ -25,7 +33,7 @@ export class DeduplicatedRequestHandler<
    */
   seedRequestReturn(key: string, value: K): Promise<K> {
     const resultPromise = Promise.resolve(value);
-    void this.inMemoryDeduplicationCache.set(key, resultPromise);
+    this.inMemoryDeduplicationCache.set(key, resultPromise);
 
     debugVerbose(
       'DeduplicatedRequestHandler.seedRequestReturn() seeded result ',
@@ -43,7 +51,7 @@ export class DeduplicatedRequestHandler<
    */
   forget(key: string, promise: Promise<K>): void {
     if (this.inMemoryDeduplicationCache.get(key) === promise) {
-      void this.inMemoryDeduplicationCache.delete(key, true);
+      this.inMemoryDeduplicationCache.delete(key);
     }
   }
 
@@ -87,7 +95,7 @@ export class DeduplicatedRequestHandler<
       }
 
       const promise = this.fn(...args);
-      void this.inMemoryDeduplicationCache.set(key, promise);
+      this.inMemoryDeduplicationCache.set(key, promise);
 
       debugVerbose(
         'DeduplicatedRequestHandler.deduplicatedFunction().dedupedFn ',
@@ -102,5 +110,62 @@ export class DeduplicatedRequestHandler<
       return promise;
     };
     return dedupedFn as T;
+  };
+}
+
+/**
+ * Keeps the in-memory cache of `handler` in step with the other instances.
+ * A delete message on `channel` removes the given keys. When the subscriber
+ * connection is lost, delete messages can be lost too, so the whole cache is
+ * cleared, and cleared again when the subscriber listens again. Expired and
+ * evicted Redis keys are not tracked; such an entry stays for at most
+ * `cachingTimeMs`.
+ *
+ * Returns a function that removes keys on this instance and then publishes
+ * the delete message to the other instances.
+ */
+export function syncDeduplicationCache(
+  handler: Pick<
+    DeduplicatedRequestHandler<never, unknown>,
+    'invalidateLocal' | 'clearLocal'
+  >,
+  options: {
+    client: Client;
+    subscriptions: RedisSubscriptions;
+    channel: string;
+  },
+): (keys: string[]) => Promise<void> {
+  const { client, subscriptions, channel } = options;
+  subscriptions.add({
+    channels: [
+      [
+        channel,
+        (message) => {
+          const syncMessage: SyncMessage<unknown> = JSON.parse(message);
+          if (syncMessage.type === 'delete' && syncMessage.keys) {
+            handler.invalidateLocal(syncMessage.keys);
+          }
+        },
+      ],
+    ],
+    onError: (_error, lost) => {
+      if (!lost) return;
+      handler.clearLocal();
+      // Reads before the new subscriber listens can cache a value that a
+      // lost message would have removed.
+      subscriptions.ready().then(
+        () => handler.clearLocal(),
+        () => undefined,
+      );
+    },
+  });
+
+  return async (keys) => {
+    handler.invalidateLocal(keys);
+    const message: SyncMessage<unknown> = { type: 'delete', keys };
+    await redisErrorHandler(
+      'DeduplicatedRequestHandler, operation: publish ' + channel + ' ' + keys,
+      client.publish(channel, JSON.stringify(message)),
+    );
   };
 }
