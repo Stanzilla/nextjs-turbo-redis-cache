@@ -115,6 +115,26 @@ function decodeValue(base64: string): ReadableStream<Uint8Array> {
   });
 }
 
+/**
+ * Returns undefined for a value that is not a stored cache entry, for example
+ * data written by another program or an older format.
+ */
+function parseStoredEntry(serialized: string): StoredCacheEntry | undefined {
+  let stored: unknown;
+  try {
+    stored = JSON.parse(serialized);
+  } catch {
+    return undefined;
+  }
+  if (typeof stored !== 'object' || stored === null) return undefined;
+  const { value, timestamp, tags } = stored as Partial<StoredCacheEntry>;
+  if (typeof value !== 'string' || typeof timestamp !== 'number') {
+    return undefined;
+  }
+  if (tags !== undefined && !Array.isArray(tags)) return undefined;
+  return stored as StoredCacheEntry;
+}
+
 // The caller creates a new handler after a constructor failure, so these
 // failures need one count across instances.
 let constructorErrorBudget: ErrorBudget | undefined;
@@ -276,7 +296,11 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
           (useDedup ? this.deduplicatedRedisGet(cacheKey) : this.redisGet)(
             redisKey,
             AbortSignal.timeout(this.getTimeoutMs),
-          ),
+          ).catch((error) => {
+            // A slow read is a miss, as in RedisStringsHandler.get().
+            if (error instanceof RedisTimeoutError) return null;
+            throw error;
+          }),
         );
 
       let usedDedup = this.redisGetDeduplication;
@@ -287,7 +311,16 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
           return undefined;
         }
 
-        const stored: StoredCacheEntry = JSON.parse(serialized);
+        const stored = parseStoredEntry(serialized);
+        if (!stored) {
+          // An unreadable entry is a miss, not a Redis failure. Otherwise one
+          // hot entry uses up the error budget.
+          console.warn(
+            'RedisCacheComponentsHandler.get() stored entry is malformed, treating as cache miss',
+            redisKey,
+          );
+          return undefined;
+        }
         const now = Date.now();
         const tags = stored.tags || [];
         const expiryTime = stored.timestamp + stored.expire * 1000;
@@ -357,6 +390,9 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     cacheKey: string,
     pendingEntry: Promise<CacheComponentsEntry>,
   ): Promise<void> {
+    // Errors before the write come from rendering or encoding. The error
+    // budget counts only Redis failures, so it does not count them.
+    let writing = false;
     try {
       await this.assertClientIsReady(this.writeTimeoutMs);
       if (this.isClientUnavailable()) {
@@ -374,6 +410,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         revalidate: Number(entry.revalidate),
       };
       const serialized = JSON.stringify(stored);
+      writing = true;
 
       const seed = this.redisGetDeduplication
         ? this.redisDeduplicationHandler.seedRequestReturn(cacheKey, serialized)
@@ -425,7 +462,9 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         'RedisCacheComponentsHandler.set() Error occurred while setting cache entry. The original error was:',
         error,
       );
-      this.errorBudget.record(error, 'RedisCacheComponentsHandler.set()');
+      if (writing) {
+        this.errorBudget.record(error, 'RedisCacheComponentsHandler.set()');
+      }
       throw error;
     }
   }
