@@ -13,6 +13,11 @@ export type CacheClientOptions = {
   errorBudget: ErrorBudget;
   /** Do not connect now, for example during `next build`. */
   deferConnection: boolean;
+  /**
+   * Called once when a user `reconnectStrategy` stopped reconnecting. The
+   * client stays closed, so setup retries on it cannot succeed.
+   */
+  onTerminated?: (error: unknown) => void;
 };
 
 /**
@@ -22,7 +27,8 @@ export type CacheClientOptions = {
  *
  * When `socketOptions.reconnectStrategy` is set, the listener does not
  * reconnect. A closed client then means that the user strategy gave up on
- * purpose.
+ * purpose, and `onTerminated` is called. node-redis 4 to 6 close the client
+ * before they emit the error that ends the reconnects.
  */
 export function createCacheClient({
   label,
@@ -32,6 +38,7 @@ export function createCacheClient({
   clientOptions,
   errorBudget,
   deferConnection,
+  onTerminated,
 }: CacheClientOptions): Client {
   const client = createClient({
     url: redisUrl,
@@ -46,11 +53,23 @@ export function createCacheClient({
   const hasUserReconnectStrategy =
     socketOptions?.reconnectStrategy !== undefined;
 
+  let terminated = false;
+  function terminateIfClosed(error: unknown) {
+    if (!hasUserReconnectStrategy || client.isOpen || terminated) return;
+    terminated = true;
+    console.error(
+      `${label} is closed for good: the reconnectStrategy stopped reconnecting. Cache calls miss until the process restarts.`,
+      error,
+    );
+    onTerminated?.(error);
+  }
+
   client.on('ready', () => errorBudget.reset());
   client.on('error', (error) => {
     console.error(`${label} error`, error);
     if (!hasUserReconnectStrategy) scheduleReconnect();
     errorBudget.record(error, label);
+    terminateIfClosed(error);
   });
 
   function scheduleReconnect() {
@@ -73,6 +92,7 @@ export function createCacheClient({
       .then(() => debug('green', `${label} connected.`))
       .catch((error) => {
         console.error(`Failed to connect ${label}:`, error);
+        terminateIfClosed(error);
       });
   }
 

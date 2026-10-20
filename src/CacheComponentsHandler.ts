@@ -3,6 +3,7 @@ import { SyncedMap } from './SyncedMap';
 import {
   createRedisSubscriptions,
   syncChannelName,
+  type RedisSubscriptions,
 } from './utils/redisSubscriptions';
 import { resolveSharedOptions, resyncDelay } from './utils/options';
 import {
@@ -153,6 +154,7 @@ function nextClock(): number {
 class RedisCacheComponentsHandler implements CacheComponentsHandler {
   // Not set when createClient() throws in the constructor.
   private client!: Client;
+  private subscriptions!: RedisSubscriptions;
   private errorBudget: ErrorBudget;
   private revalidatedTagsMap: SyncedMap<TagManifestEntry | number>;
   private invalidateDeduplicationCache: (keys: string[]) => Promise<void>;
@@ -208,12 +210,14 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         clientOptions,
         errorBudget: this.errorBudget,
         deferConnection: this.redisConnectionDeferred,
+        onTerminated: (error) => this.stopSync(error),
       });
 
       const filterKeys = (key: string): boolean =>
         key !== REVALIDATED_TAGS_KEY && key !== LEGACY_SHARED_TAGS_KEY;
 
       const subscriptions = createRedisSubscriptions(this.client);
+      this.subscriptions = subscriptions;
 
       this.revalidatedTagsMap = new SyncedMap<TagManifestEntry | number>({
         client: this.client,
@@ -260,6 +264,17 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       );
       throw error;
     }
+  }
+
+  /**
+   * The client is closed for good, so the setup retries cannot succeed. A
+   * failed constructor can close the client before the maps exist.
+   */
+  private stopSync(reason: unknown): void {
+    void Promise.all([
+      this.revalidatedTagsMap?.stop(reason),
+      this.subscriptions?.close(),
+    ]);
   }
 
   // Reads never reconnect: a closed client stays closed until its reconnect

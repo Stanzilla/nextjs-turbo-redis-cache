@@ -3,6 +3,7 @@ import { SyncedMap } from './SyncedMap';
 import {
   createRedisSubscriptions,
   syncChannelName,
+  type RedisSubscriptions,
 } from './utils/redisSubscriptions';
 import { resolveSharedOptions, resyncDelay } from './utils/options';
 import {
@@ -302,6 +303,7 @@ function malformedCacheEntryReason(entry: CacheEntry): string | undefined {
 export default class RedisStringsHandler {
   // Not set when createClient() throws in the constructor.
   private client!: Client;
+  private subscriptions!: RedisSubscriptions;
   private sharedTagsMap: SyncedMap<string[], TagIndex>;
   private revalidatedTagsMap: SyncedMap<number>;
   private invalidateDeduplicationCache: (keys: string[]) => Promise<void>;
@@ -368,6 +370,7 @@ export default class RedisStringsHandler {
           clientOptions,
           errorBudget: this.errorBudget,
           deferConnection: this.redisConnectionDeferred,
+          onTerminated: (error) => this.stopSync(error),
         });
       } catch (error: unknown) {
         console.error('Failed to initialize Redis client');
@@ -378,6 +381,7 @@ export default class RedisStringsHandler {
         key !== REVALIDATED_TAGS_KEY && key !== sharedTagsKey;
 
       const subscriptions = createRedisSubscriptions(this.client);
+      this.subscriptions = subscriptions;
 
       this.sharedTagsMap = new SyncedMap<string[], TagIndex>({
         client: this.client,
@@ -435,6 +439,18 @@ export default class RedisStringsHandler {
       constructorErrorBudget.record(error, 'RedisStringsHandler constructor');
       throw error;
     }
+  }
+
+  /**
+   * The client is closed for good, so the setup retries cannot succeed. A
+   * failed constructor can close the client before the maps exist.
+   */
+  private stopSync(reason: unknown): void {
+    void Promise.all([
+      this.sharedTagsMap?.stop(reason),
+      this.revalidatedTagsMap?.stop(reason),
+      this.subscriptions?.close(),
+    ]);
   }
 
   resetRequestCache(): void {}
