@@ -31,9 +31,10 @@ vi.mock('redis', () => ({
       hoisted.strings.set(key, value);
       return 'OK';
     }),
-    unlink: vi.fn(async (keys: string[]) => {
-      for (const key of keys) hoisted.strings.delete(key);
-      return keys.length;
+    unlink: vi.fn(async (keys: string | string[]) => {
+      const list = Array.isArray(keys) ? keys : [keys];
+      for (const key of list) hoisted.strings.delete(key);
+      return list.length;
     }),
     sendCommand: vi.fn(async ([command, name]: string[]) => {
       if (command !== 'HSCAN') throw new Error(`Unexpected ${command}`);
