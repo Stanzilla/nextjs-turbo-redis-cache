@@ -143,7 +143,7 @@ describe(`Redis writes with redis ${redisPackage.version} when Redis stops answe
     expect(consoleSpy.error).not.toHaveBeenCalled();
   });
 
-  it('Cache Components updateTags() returns after writeTimeoutMs and logs a warning', async () => {
+  it('Cache Components updateTags() rejects after writeTimeoutMs, so the caller sees the failed invalidation', async () => {
     const consoleSpy = spyOnConsole();
     server.pause();
 
@@ -151,10 +151,9 @@ describe(`Redis writes with redis ${redisPackage.version} when Redis stops answe
       components.updateTags(['tag-b']),
     );
 
-    expect(outcome).toBe('resolved');
+    expect(outcome).toBe('rejected');
     expect(elapsedMs).toBeLessThan(1_000);
-    expect(consoleSpy.warn).toHaveBeenCalledOnce();
-    expect(consoleSpy.error).not.toHaveBeenCalled();
+    expect(consoleSpy.error).toHaveBeenCalledOnce();
   });
 
   it('Cache Components get() of a stale entry is a miss after getTimeoutMs when the unlink script hangs', async () => {

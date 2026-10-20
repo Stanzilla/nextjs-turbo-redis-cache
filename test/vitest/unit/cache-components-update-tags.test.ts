@@ -113,6 +113,15 @@ describe('RedisCacheComponentsHandler.updateTags vs Next.js default handler', ()
     });
   }
 
+  it('rejects when the Redis client is not ready, so the caller sees the lost invalidation', async () => {
+    const handler = await createHandler('not-ready:');
+    (handler as unknown as { client: { isReady: boolean } }).client.isReady =
+      false;
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(handler.updateTags(['tag'])).rejects.toThrow('not ready');
+  });
+
   it('SWR expire keeps the entry and sets revalidate=-1 until the window elapses', async () => {
     const handler = await createHandler('swr:');
     const createdAt = Date.now();
