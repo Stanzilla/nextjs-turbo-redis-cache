@@ -325,7 +325,6 @@ export default class RedisStringsHandler {
   private deduplicatedRedisGet: (key: string) => AbortableGet;
   private keyPrefix: string;
   private redisGetDeduplication: boolean;
-  private inMemoryCachingTime: number;
   private defaultStaleAge: number;
   private estimateExpireAge: (staleAge: number) => number;
   private errorBudget: ErrorBudget;
@@ -365,7 +364,6 @@ export default class RedisStringsHandler {
     try {
       this.keyPrefix = keyPrefix;
       this.redisGetDeduplication = redisGetDeduplication;
-      this.inMemoryCachingTime = inMemoryCachingTime;
       this.defaultStaleAge = defaultStaleAge;
       this.estimateExpireAge = estimateExpireAge;
       this.revalidateTagDeleteConcurrency = Math.max(
@@ -757,10 +755,10 @@ export default class RedisStringsHandler {
       // When the new value is in redis, remove the old copy from the in-memory deduplication cache
       // of every instance. Otherwise the other instances serve the old value for up to inMemoryCachingTime.
       // This also removes the seed on this instance, so its next read gets the new value from redis.
-      const invalidateDeduplicationCacheOperation =
-        this.redisGetDeduplication && this.inMemoryCachingTime > 0
-          ? setOperation.then(() => this.invalidateDeduplicationCache([key]))
-          : undefined;
+      // Publish also when this instance has no in-memory cache: peers can have other settings.
+      const invalidateDeduplicationCacheOperation = setOperation.then(() =>
+        this.invalidateDeduplicationCache([key]),
+      );
 
       debug(
         'blue',
@@ -913,8 +911,8 @@ export default class RedisStringsHandler {
             redisKeys[index]!,
           ]),
         );
-        const clearLocalReadCache =
-          this.redisGetDeduplication && this.inMemoryCachingTime > 0;
+        // Peers can have other settings, so clear also without a local in-memory cache.
+        const clearLocalReadCache = true;
 
         // Clear local read-through cache before deleting Redis values. With
         // slot-grouped deletes, some Redis keys can be gone while other slots are
