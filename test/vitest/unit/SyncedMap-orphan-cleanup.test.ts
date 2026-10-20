@@ -10,8 +10,12 @@ class HashMockClient {
   /** Runs when the cleanup checks if the cache keys exist. */
   beforeKeyCheck?: () => void;
   evalError?: Error;
+  /** Runs after the script and before its reply, like a peer write. */
+  afterScript?: () => Promise<void>;
   isOpen = true;
   isReady = true;
+  /** Shared with duplicates, so a publish reaches the subscriber. */
+  subscriptions = new Map<string, ((message: string) => unknown)[]>();
 
   on() {
     return this;
@@ -26,7 +30,16 @@ class HashMockClient {
     return { 'notify-keyspace-events': 'Exe' };
   }
 
-  async subscribe() {}
+  async subscribe(channel: string, listener: (message: string) => unknown) {
+    const listeners = this.subscriptions.get(channel) ?? [];
+    this.subscriptions.set(channel, [...listeners, listener]);
+  }
+
+  async deliver(channel: string, message: string) {
+    for (const listener of this.subscriptions.get(channel) ?? []) {
+      await listener(message);
+    }
+  }
 
   async quit() {}
 
@@ -36,7 +49,9 @@ class HashMockClient {
   }
 
   duplicate() {
-    return new HashMockClient();
+    const subscriber = new HashMockClient();
+    subscriber.subscriptions = this.subscriptions;
+    return subscriber;
   }
 
   async sendCommand(args: string[]) {
@@ -65,8 +80,9 @@ class HashMockClient {
     return list.length;
   }
 
-  async publish(_channel: string, message: string) {
+  async publish(channel: string, message: string) {
     this.publishes.push(message);
+    await this.deliver(channel, message);
     return 1;
   }
 
@@ -92,6 +108,7 @@ class HashMockClient {
         JSON.stringify({ type: 'delete', keys: removed }),
       );
     }
+    await this.afterScript?.();
     return removed;
   }
 }
@@ -139,6 +156,26 @@ describe('SyncedMap orphan cleanup', () => {
 
     expect(client.hash.has('old')).toBe(true);
     expect(map.get('old')).toBe(1);
+  });
+
+  it('keeps a field that a peer stores again before the script reply arrives', async () => {
+    const client = new HashMockClient();
+    const map = createMap(client);
+    await map.waitUntilReady();
+    await map.set('page', 1);
+
+    client.afterScript = async () => {
+      client.stringKeys.push('app:page');
+      await client.hSet('app:__sharedTags__', 'page', '2');
+      await client.publish(
+        'app::sync-channel:__sharedTags__',
+        JSON.stringify({ type: 'insert', key: 'page', value: 2 }),
+      );
+    };
+    await (map as any).initialSync();
+
+    expect(client.hash.get('page')).toBe('2');
+    expect(map.get('page')).toBe(2);
   });
 
   it('checks the fields in batches of querySize', async () => {
