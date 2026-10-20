@@ -254,7 +254,9 @@ export class SyncedMap<V> {
     try {
       for (let i = 0; i < fields.length; i += this.querySize) {
         const batch = fields.slice(i, i + this.querySize);
-        const removed = (await redisErrorHandler(
+        // The script publishes the delete. The subscriber applies it in
+        // channel order, so a later insert from a peer is not lost.
+        await redisErrorHandler(
           'SyncedMap.cleanupKeysNotInRedis(), operation: EVAL ' +
             this.keyPrefix +
             this.redisKey,
@@ -265,8 +267,7 @@ export class SyncedMap<V> {
             ],
             arguments: [this.syncChannel, ...batch],
           }),
-        )) as string[];
-        for (const key of removed) this.map.delete(key);
+        );
       }
     } catch (error) {
       console.error('Error during cleanup of keys not in Redis:', error);
