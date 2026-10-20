@@ -141,6 +141,15 @@ function parseStoredEntry(serialized: string): StoredCacheEntry | undefined {
 // failures need one count across instances.
 let constructorErrorBudget: ErrorBudget | undefined;
 
+/**
+ * The clock that Next.js uses for `entry.timestamp` and for the tag manifest
+ * (DefaultCacheHandler in Next.js 16). Date.now() can differ from it by up to
+ * one millisecond, and by more after an NTP step.
+ */
+function nextClock(): number {
+  return performance.timeOrigin + performance.now();
+}
+
 class RedisCacheComponentsHandler implements CacheComponentsHandler {
   // Not set when createClient() throws in the constructor.
   private client!: Client;
@@ -264,7 +273,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     return this.redisConnectionDeferred || !this.client.isReady;
   }
 
-  private tagManifestFor(tag: string, now = Date.now()): TagManifestEntry {
+  private tagManifestFor(tag: string, now = nextClock()): TagManifestEntry {
     return normalizeTagManifest(this.revalidatedTagsMap.get(tag), now);
   }
 
@@ -324,7 +333,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
           );
           return undefined;
         }
-        const now = Date.now();
+        const now = nextClock();
         const tags = stored.tags || [];
         const expiryTime = stored.timestamp + stored.expire * 1000;
         const ttlExpired =
@@ -513,7 +522,11 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         );
       }
 
-      const now = Date.now();
+      // Next.js rounds the clock when it writes a tag update, and does not
+      // round it when it reads. We do the same, so both handlers decide the
+      // same way. An entry stamped less than 0.5 ms before the update can
+      // still be served. Clock skew between hosts is much larger than that.
+      const now = Math.round(nextClock());
       const updated = new Set(tags || []);
       const writes: Promise<void>[] = [];
       for (const tag of updated) {

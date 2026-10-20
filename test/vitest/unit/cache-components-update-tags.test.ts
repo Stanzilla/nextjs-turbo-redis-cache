@@ -122,6 +122,26 @@ describe('RedisCacheComponentsHandler.updateTags vs Next.js default handler', ()
     await expect(handler.updateTags(['tag'])).rejects.toThrow('not ready');
   });
 
+  it('rounds the update time on the Next.js clock, so an entry from earlier in the same millisecond is invalidated', async () => {
+    const handler = await createHandler('clock:');
+    const ms = Date.now();
+    const atPerfClock = (value: number) =>
+      vi
+        .spyOn(performance, 'now')
+        .mockReturnValue(value - performance.timeOrigin);
+
+    // Next.js stamps the entry with the unrounded performance clock.
+    await handler.set(
+      'page',
+      Promise.resolve(cachedEntry(['posts'], ms + 0.4)),
+    );
+    atPerfClock(ms + 0.6);
+    await handler.updateTags(['posts']);
+    atPerfClock(ms + 1.2);
+
+    expect(await handler.get('page', [])).toBeUndefined();
+  });
+
   it('SWR expire keeps the entry and sets revalidate=-1 until the window elapses', async () => {
     const handler = await createHandler('swr:');
     const createdAt = Date.now();

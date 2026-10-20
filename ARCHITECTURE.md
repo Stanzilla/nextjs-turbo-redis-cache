@@ -415,6 +415,8 @@ flowchart TD
 
 Next.js always calls `updateTags(tags, durations?)` with `{ stale, expired }` semantics. It does not write plain numbers into the cache handler. Plain numbers in Redis are a rolling-upgrade artifact from older package versions that stored `Date.now()` directly. A _future-looking_ plain number is not an SWR `expired` window (those always include `stale`); it only arises from cross-instance clock skew. `normalizeTagManifest()` clamps legacy plain numbers to `Math.min(stored, now)` on read so slower instances do not delay invalidation.
 
+The handler uses the same clock as Next.js, `performance.timeOrigin + performance.now()`, not `Date.now()`. Like the Next.js `DefaultCacheHandler`, `updateTags()` rounds this time and `get()` does not. Entries and tag updates come from different hosts, so the tag check is only as exact as the clock sync between the hosts. Clock skew between hosts is usually much larger than the 0.5 ms rounding.
+
 **`resolveCacheEntryTtlSeconds()` returning `undefined`**
 
 Returning `undefined` when both `cacheControl.expire` and `revalidate` are absent is deliberate: Redis keys are written without `EX` and invalidation relies on tags. `revalidate: false` is handled separately and maps to `defaultStaleAge` (see `cache-ttl.test.ts` and Pages Router `/static-forever` integration). Next.js supplies `revalidate: false` for fully static pages in practice.
