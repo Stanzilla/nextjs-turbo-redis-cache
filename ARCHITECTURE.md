@@ -106,7 +106,7 @@ flowchart LR
     end
 ```
 
-When `revalidateTag("product")` is called, the handler iterates `sharedTagsMap` to find `/products/42` and `/products/99`, then batch-deletes them from Redis in a single `UNLINK` call.
+When `revalidateTag("product")` is called, the handler iterates `sharedTagsMap` to find `/products/42` and `/products/99`, then batch-deletes them from Redis in a single `UNLINK` call. With the `tagIndex` option, `sharedTagsMap` also keeps a tag → keys index, so the handler looks up the keys of the tags instead of scanning every entry. `SyncedMap` feeds the index from the same place that changes the map (set, delete, and each `HSCAN` batch of a reload).
 
 ---
 
