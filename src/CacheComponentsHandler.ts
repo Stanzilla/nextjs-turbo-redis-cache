@@ -4,6 +4,7 @@ import {
   createRedisSubscriptions,
   syncChannelName,
 } from './utils/redisSubscriptions';
+import { resolveSharedOptions, resyncDelay } from './utils/options';
 import {
   DeduplicatedRequestHandler,
   syncDeduplicationCache,
@@ -33,7 +34,6 @@ import {
   persistableTagManifest,
   type TagManifestEntry,
 } from './utils/tagRevalidation';
-import { parseEnvInt } from './utils/env';
 
 export interface CacheComponentsEntry {
   value: ReadableStream<Uint8Array>;
@@ -137,30 +137,21 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
   private redisGetDeduplication: boolean;
   private redisConnectionDeferred: boolean;
 
-  constructor({
-    redisUrl = process.env.REDIS_URL
-      ? process.env.REDIS_URL
-      : process.env.REDISHOST
-        ? `redis://${process.env.REDISHOST}:${process.env.REDISPORT}`
-        : 'redis://localhost:6379',
-    database = process.env.VERCEL_ENV === 'production' ? 0 : 1,
-    keyPrefix,
-    getTimeoutMs = parseEnvInt('REDIS_COMMAND_TIMEOUT_MS', 500, { min: 1 }),
-    writeTimeoutMs = parseEnvInt('REDIS_WRITE_TIMEOUT_MS', getTimeoutMs, {
-      min: 1,
-    }),
-    revalidateTagQuerySize = 250,
-    avgResyncIntervalMs = 60 * 60 * 1_000,
-    redisGetDeduplication = true,
-    inMemoryCachingTime = 10_000,
-    socketOptions,
-    clientOptions,
-    killContainerOnErrorThreshold = parseEnvInt(
-      'KILL_CONTAINER_ON_ERROR_THRESHOLD',
-      0,
-    ),
-    serverDistDir,
-  }: CreateCacheComponentsHandlerOptions) {
+  constructor(options: CreateCacheComponentsHandlerOptions) {
+    const {
+      redisUrl,
+      database,
+      getTimeoutMs,
+      writeTimeoutMs,
+      revalidateTagQuerySize,
+      avgResyncIntervalMs,
+      redisGetDeduplication,
+      inMemoryCachingTime,
+      killContainerOnErrorThreshold,
+      socketOptions,
+      clientOptions,
+    } = resolveSharedOptions(options);
+    const { keyPrefix, serverDistDir } = options;
     this.errorBudget = new ErrorBudget(killContainerOnErrorThreshold, () =>
       disconnectAndExit(this.client),
     );
@@ -199,10 +190,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         querySize: revalidateTagQuerySize,
         filterKeys,
         customizedSync: { fieldsAreNotRedisKeys: true },
-        resyncIntervalMs:
-          avgResyncIntervalMs +
-          avgResyncIntervalMs / 10 +
-          Math.random() * (avgResyncIntervalMs / 10),
+        resyncIntervalMs: resyncDelay(avgResyncIntervalMs, 'after'),
       });
 
       const redisGet = createAbortableGet(this.client);
