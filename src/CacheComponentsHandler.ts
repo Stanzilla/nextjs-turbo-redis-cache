@@ -1,7 +1,13 @@
 import type { CreateRedisStringsHandlerOptions } from './RedisStringsHandler';
 import { SyncedMap } from './SyncedMap';
-import { createRedisSubscriptions } from './utils/redisSubscriptions';
-import { DeduplicatedRequestHandler } from './DeduplicatedRequestHandler';
+import {
+  createRedisSubscriptions,
+  syncChannelName,
+} from './utils/redisSubscriptions';
+import {
+  DeduplicatedRequestHandler,
+  syncDeduplicationCache,
+} from './DeduplicatedRequestHandler';
 import { resolveKeyPrefix } from './utils/prefix';
 import {
   type Client,
@@ -118,7 +124,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
   private client!: Client;
   private errorBudget: ErrorBudget;
   private revalidatedTagsMap: SyncedMap<TagManifestEntry | number>;
-  private inMemoryDeduplicationCache: SyncedMap<Promise<string | null>>;
+  private invalidateDeduplicationCache: (keys: string[]) => Promise<void>;
   private keyPrefix: string;
   private getTimeoutMs: number;
   private writeTimeoutMs: number;
@@ -199,25 +205,21 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
           Math.random() * (avgResyncIntervalMs / 10),
       });
 
-      this.inMemoryDeduplicationCache = new SyncedMap({
-        client: this.client,
-        subscriptions,
-        keyPrefix: this.keyPrefix,
-        redisKey: '__cacheComponents_inMemoryDeduplicationCache__',
-        database,
-        querySize: revalidateTagQuerySize,
-        filterKeys,
-        customizedSync: {
-          withoutRedisHashmap: true,
-          withoutSetSync: true,
-        },
-      });
-
       const redisGet = createAbortableGet(this.client);
       this.redisDeduplicationHandler = new DeduplicatedRequestHandler(
         redisGet,
         inMemoryCachingTime,
-        this.inMemoryDeduplicationCache,
+      );
+      this.invalidateDeduplicationCache = syncDeduplicationCache(
+        this.redisDeduplicationHandler,
+        {
+          client: this.client,
+          subscriptions,
+          channel: syncChannelName(
+            this.keyPrefix,
+            '__cacheComponents_inMemoryDeduplicationCache__',
+          ),
+        },
       );
       this.redisGet = redisGet;
       this.deduplicatedRedisGet =
@@ -414,7 +416,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       // miss from the in-memory cache of every instance. Also when this
       // instance has the cache off, because other instances can have it on.
       const invalidateDeduplicationCacheOperation = setOperation.then(() =>
-        this.inMemoryDeduplicationCache.delete(cacheKey),
+        this.invalidateDeduplicationCache([cacheKey]),
       );
 
       await untilDeadline(

@@ -6,12 +6,11 @@ import {
   createRedisSubscriptions,
   type MessageHandler,
   type RedisSubscriptions,
+  syncChannelName,
 } from './utils/redisSubscriptions';
 import { createRetrier, type Retrier } from './utils/retry';
 
 type CustomizedSync = {
-  withoutRedisHashmap?: boolean;
-  withoutSetSync?: boolean;
   /**
    * The hash fields are not Redis string keys (tag names). Such a map skips
    * the SCAN-based orphan cleanup, which would HDEL every tag, and the
@@ -43,8 +42,6 @@ export type SyncMessage<V> = {
   value?: V;
   keys?: string[];
 };
-
-const SYNC_CHANNEL_SUFFIX = ':sync-channel:';
 
 /**
  * KEYS[1] is the hash and ARGV[1] is the sync channel. For i >= 2, KEYS[i] is
@@ -102,7 +99,7 @@ export class SyncedMap<V> {
     this.client = options.client;
     this.keyPrefix = options.keyPrefix;
     this.redisKey = options.redisKey;
-    this.syncChannel = `${options.keyPrefix}${SYNC_CHANNEL_SUFFIX}${options.redisKey}`;
+    this.syncChannel = syncChannelName(options.keyPrefix, options.redisKey);
     this.database = options.database;
     this.querySize = options.querySize;
     this.filterKeys = options.filterKeys;
@@ -128,9 +125,7 @@ export class SyncedMap<V> {
       this.markReady();
       return;
     }
-    if (!this.customizedSync?.withoutRedisHashmap) {
-      this.setupPeriodicResync();
-    }
+    this.setupPeriodicResync();
     await this.runSync();
   }
 
@@ -149,13 +144,11 @@ export class SyncedMap<V> {
           this.reloadNeeded = true;
         }
         this.reloadNeeded = false;
-        if (!this.customizedSync?.withoutRedisHashmap) {
-          await this.retrier.run(
-            'Initial sync',
-            () => this.initialSync(),
-            (error) => this.recordSetupError(error),
-          );
-        }
+        await this.retrier.run(
+          'Initial sync',
+          () => this.initialSync(),
+          (error) => this.recordSetupError(error),
+        );
       }
       this.markReady();
     })()
@@ -446,27 +439,21 @@ export class SyncedMap<V> {
     this.setLocal(key, value);
     const operations = [];
 
-    // This is needed if we only want to sync delete commands. This is especially useful for non serializable data like a promise map
-    if (this.customizedSync?.withoutSetSync) {
-      return;
-    }
-    if (!this.customizedSync?.withoutRedisHashmap) {
-      operations.push(
-        redisErrorHandler(
-          'SyncedMap.set(), operation: hSet ' +
-            this.syncChannel +
-            ' ' +
-            this.keyPrefix +
-            ' ' +
-            key,
-          this.client.hSet(
-            this.keyPrefix + this.redisKey,
-            key as unknown as string,
-            JSON.stringify(value),
-          ),
+    operations.push(
+      redisErrorHandler(
+        'SyncedMap.set(), operation: hSet ' +
+          this.syncChannel +
+          ' ' +
+          this.keyPrefix +
+          ' ' +
+          key,
+        this.client.hSet(
+          this.keyPrefix + this.redisKey,
+          key as unknown as string,
+          JSON.stringify(value),
         ),
-      );
-    }
+      ),
+    );
 
     const insertMessage: SyncMessage<V> = {
       type: 'insert',
@@ -505,21 +492,19 @@ export class SyncedMap<V> {
       this.deleteLocal(key);
     }
 
-    if (!this.customizedSync?.withoutRedisHashmap) {
-      operations.push(
-        redisErrorHandler(
-          'SyncedMap.delete(), operation: hDel ' +
-            this.syncChannel +
-            ' ' +
-            this.keyPrefix +
-            ' ' +
-            this.redisKey +
-            ' ' +
-            keysArray,
-          this.client.hDel(this.keyPrefix + this.redisKey, keysArray),
-        ),
-      );
-    }
+    operations.push(
+      redisErrorHandler(
+        'SyncedMap.delete(), operation: hDel ' +
+          this.syncChannel +
+          ' ' +
+          this.keyPrefix +
+          ' ' +
+          this.redisKey +
+          ' ' +
+          keysArray,
+        this.client.hDel(this.keyPrefix + this.redisKey, keysArray),
+      ),
+    );
 
     if (!withoutSyncMessage) {
       operations.push(this.publishDeletion(keysArray));

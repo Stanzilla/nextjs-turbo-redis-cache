@@ -35,6 +35,11 @@ type Connection = {
 
 const KEYEVENT_CHANNEL_PREFIX = '__keyevent@';
 
+/** The Pub/Sub channel for the changes to the data named `redisKey`. */
+export function syncChannelName(keyPrefix: string, redisKey: string): string {
+  return `${keyPrefix}:sync-channel:${redisKey}`;
+}
+
 async function disconnect(client: Client | undefined) {
   try {
     // A delayed error from the old socket must not reach the listeners.

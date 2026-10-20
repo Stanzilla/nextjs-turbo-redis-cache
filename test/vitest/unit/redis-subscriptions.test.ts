@@ -14,6 +14,7 @@ type MockClient = ReturnType<typeof createMockClient>;
 function createMockClient() {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
   const client = {
+    channels: [] as string[],
     isOpen: true,
     isReady: true,
     on(event: string, cb: (...args: unknown[]) => void) {
@@ -40,11 +41,12 @@ function createMockClient() {
     async configGet() {
       return { 'notify-keyspace-events': 'Exe' };
     },
-    async subscribe() {
+    async subscribe(channel: string) {
       if (redisState.subscribeFailuresLeft > 0) {
         redisState.subscribeFailuresLeft--;
         throw new Error('Mock subscribe failure');
       }
+      client.channels.push(channel);
     },
     async sendCommand() {
       return ['0', []];
@@ -65,13 +67,15 @@ vi.mock('redis', () => ({
 }));
 
 const subscribers = () => redisState.duplicates as MockClient[];
+const syncChannels = (client: MockClient) =>
+  client.channels.filter((channel) => channel.includes(':sync-channel:'));
 
 async function allMapsReady(handler: object) {
   const { SyncedMap } = await import('../../../src/SyncedMap');
   const maps = Object.values(handler).filter(
     (value) => value instanceof SyncedMap,
   );
-  expect(maps.length).toBeGreaterThan(1);
+  expect(maps.length).toBeGreaterThan(0);
   await vi.waitFor(() => SyncedMap.waitUntilAllReady(maps), {
     timeout: 3_000,
   });
@@ -96,6 +100,8 @@ describe('one subscriber connection per handler', () => {
     await allMapsReady(handler);
 
     expect(subscribers()).toHaveLength(1);
+    // Two tag maps and the in-memory read cache.
+    expect(syncChannels(subscribers()[0])).toHaveLength(3);
   });
 
   it('CacheComponentsHandler opens one subscriber for all of its maps', async () => {
@@ -105,6 +111,8 @@ describe('one subscriber connection per handler', () => {
     await allMapsReady(handler);
 
     expect(subscribers()).toHaveLength(1);
+    // The tag manifest and the in-memory read cache.
+    expect(syncChannels(subscribers()[0])).toHaveLength(2);
   });
 
   it('a lost subscriber makes every map reload, with one new connection', async () => {

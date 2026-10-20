@@ -6,7 +6,9 @@ import RedisStringsHandler from '../../../src/RedisStringsHandler';
 // pub/sub bus that delivers each message to every subscriber.
 const hoisted = vi.hoisted(() => {
   const store = new Map<string, string>();
-  const subscribers = new Map<string, Set<(message: string) => void>>();
+  // A dropped client stops getting messages, like a broken socket.
+  type Listener = ((message: string) => void) & { dropped?: () => boolean };
+  const subscribers = new Map<string, Set<Listener>>();
   const published: { channel: string; message: string }[] = [];
   const control = {
     failSet: false,
@@ -20,65 +22,80 @@ const hoisted = vi.hoisted(() => {
 });
 
 vi.mock('redis', () => {
-  const createClient = () => ({
-    isReady: true,
-    isOpen: true,
-    on: vi.fn(),
-    connect: vi.fn(async () => undefined),
-    disconnect: vi.fn(async () => undefined),
-    quit: vi.fn(async () => undefined),
-    duplicate: vi.fn(() => createClient()),
-    configGet: vi.fn(async () => ({ 'notify-keyspace-events': 'Exe' })),
-    subscribe: vi.fn(
-      async (channel: string, listener: (message: string) => void) => {
-        if (!hoisted.subscribers.has(channel)) {
-          hoisted.subscribers.set(channel, new Set());
+  const createClient = () => {
+    const errorListeners = new Set<(error: Error) => void>();
+    const client = {
+      isReady: true,
+      isOpen: true,
+      dropped: false,
+      on: vi.fn((event: string, listener: (error: Error) => void) => {
+        if (event === 'error') errorListeners.add(listener);
+      }),
+      removeAllListeners: vi.fn(() => errorListeners.clear()),
+      emitError: (error: Error) => {
+        for (const listener of [...errorListeners]) listener(error);
+      },
+      connect: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+      quit: vi.fn(async () => undefined),
+      duplicate: vi.fn(() => createClient()),
+      configGet: vi.fn(async () => ({ 'notify-keyspace-events': 'Exe' })),
+      subscribe: vi.fn(
+        async (channel: string, listener: (message: string) => void) => {
+          if (!hoisted.subscribers.has(channel)) {
+            hoisted.subscribers.set(channel, new Set());
+          }
+          hoisted.subscribers
+            .get(channel)!
+            .add(Object.assign(listener, { dropped: () => client.dropped }));
+        },
+      ),
+      publish: vi.fn(async (channel: string, message: string) => {
+        hoisted.published.push({ channel, message });
+        const listeners = hoisted.subscribers.get(channel) ?? new Set();
+        for (const listener of listeners) {
+          if (!listener.dropped?.()) listener(message);
         }
-        hoisted.subscribers.get(channel)!.add(listener);
-      },
-    ),
-    publish: vi.fn(async (channel: string, message: string) => {
-      hoisted.published.push({ channel, message });
-      const listeners = hoisted.subscribers.get(channel) ?? new Set();
-      for (const listener of listeners) listener(message);
-      return listeners.size;
-    }),
-    get: vi.fn(async (_opts: unknown, key: string) => {
-      const value = hoisted.store.get(key) ?? null;
-      await hoisted.control.holdGet;
-      return value;
-    }),
-    set: vi.fn(async (key: string, value: string) => {
-      if (hoisted.control.failSet) throw new Error('SET failed');
-      await hoisted.control.holdSet;
-      hoisted.store.set(key, value);
-      return 'OK';
-    }),
-    unlink: vi.fn(async (keys: string[]) => {
-      for (const key of keys) hoisted.store.delete(key);
-      return keys.length;
-    }),
-    sendCommand: vi.fn(async (args: string[]) => {
-      const [command] = args;
-      if (command === 'HSCAN' || command === 'SCAN') {
-        return ['0', []];
-      }
-      throw new Error(`Unexpected sendCommand: ${command}`);
-    }),
-    eval: vi.fn(
-      async (
-        _script: string,
-        options: { keys: string[]; arguments: string[] },
-      ) => {
-        const [key] = options.keys;
-        if (hoisted.store.get(key) !== options.arguments[0]) return 0;
-        hoisted.store.delete(key);
-        return 1;
-      },
-    ),
-    hSet: vi.fn(async () => 1),
-    hDel: vi.fn(async () => 1),
-  });
+        return listeners.size;
+      }),
+      get: vi.fn(async (_opts: unknown, key: string) => {
+        const value = hoisted.store.get(key) ?? null;
+        await hoisted.control.holdGet;
+        return value;
+      }),
+      set: vi.fn(async (key: string, value: string) => {
+        if (hoisted.control.failSet) throw new Error('SET failed');
+        await hoisted.control.holdSet;
+        hoisted.store.set(key, value);
+        return 'OK';
+      }),
+      unlink: vi.fn(async (keys: string[]) => {
+        for (const key of keys) hoisted.store.delete(key);
+        return keys.length;
+      }),
+      sendCommand: vi.fn(async (args: string[]) => {
+        const [command] = args;
+        if (command === 'HSCAN' || command === 'SCAN') {
+          return ['0', []];
+        }
+        throw new Error(`Unexpected sendCommand: ${command}`);
+      }),
+      eval: vi.fn(
+        async (
+          _script: string,
+          options: { keys: string[]; arguments: string[] },
+        ) => {
+          const [key] = options.keys;
+          if (hoisted.store.get(key) !== options.arguments[0]) return 0;
+          hoisted.store.delete(key);
+          return 1;
+        },
+      ),
+      hSet: vi.fn(async () => 1),
+      hDel: vi.fn(async () => 1),
+    };
+    return client;
+  };
   return {
     createClient,
     commandOptions: vi.fn((opts) => opts),
@@ -122,6 +139,34 @@ function createInstance(inMemoryCachingTime: number) {
 async function readHtml(handler: RedisStringsHandler) {
   const entry = await handler.get(KEY, getCtx);
   return (entry?.value as { html?: string } | undefined)?.html ?? null;
+}
+
+type SubscriberClient = { dropped: boolean; emitError(error: Error): void };
+type WithSubscriptions = {
+  subscriptions: { client: SubscriberClient; ready(): Promise<void> };
+};
+
+// The subscriber of an instance loses its connection: messages published
+// meanwhile do not arrive. The error then makes the instance subscribe again
+// on a new connection.
+async function loseSubscriber(
+  map: WithSubscriptions,
+  during: () => Promise<void>,
+) {
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const subscriber = map.subscriptions.client;
+  subscriber.dropped = true;
+  await during();
+  subscriber.emitError(new Error('Socket closed unexpectedly'));
+  await map.subscriptions.ready();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function publishRaw(channel: string, keys: string[]) {
+  const listeners = hoisted.subscribers.get(channel) ?? new Set();
+  for (const listener of listeners) {
+    listener(JSON.stringify({ type: 'delete', keys }));
+  }
 }
 
 function readCacheMessages() {
@@ -258,6 +303,36 @@ describe('in-memory read cache across instances', () => {
 
     expect(await readHtml(reader)).toBeNull();
   });
+
+  it('does not serve a value that changed while its subscriber was lost', async () => {
+    const writer = createInstance(10_000);
+    const reader = createInstance(10_000);
+    await writer.set(KEY, page('v1'), setCtx);
+    expect(await readHtml(reader)).toBe('v1');
+
+    await loseSubscriber(
+      (reader as unknown as { sharedTagsMap: WithSubscriptions }).sharedTagsMap,
+      () => writer.set(KEY, page('v2'), setCtx),
+    );
+
+    expect(await readHtml(reader)).toBe('v2');
+  });
+
+  it('drops the cached copy on a delete message from an older version', async () => {
+    const writer = createInstance(10_000);
+    const reader = createInstance(10_000);
+    await writer.set(KEY, page('v2'), setCtx);
+    const v2 = hoisted.store.get('test:' + KEY)!;
+    await writer.set(KEY, page('v1'), setCtx);
+    expect(await readHtml(reader)).toBe('v1');
+    // A change that this instance does not see, for example from a script.
+    hoisted.store.set('test:' + KEY, v2);
+    expect(await readHtml(reader)).toBe('v1');
+
+    publishRaw('test::sync-channel:inMemoryDeduplicationCache', [KEY]);
+
+    expect(await readHtml(reader)).toBe('v2');
+  });
 });
 
 describe('Cache Components in-memory read cache across instances', () => {
@@ -325,6 +400,39 @@ describe('Cache Components in-memory read cache across instances', () => {
     await write(writer, 'v1');
 
     expect(await read(reader)).toBe('v1');
+  });
+
+  it('does not serve a value that changed while its subscriber was lost', async () => {
+    const writer = await createCacheComponentsInstance();
+    const reader = await createCacheComponentsInstance();
+    await write(writer, 'v1');
+    expect(await read(reader)).toBe('v1');
+
+    await loseSubscriber(
+      (reader as unknown as { revalidatedTagsMap: WithSubscriptions })
+        .revalidatedTagsMap,
+      () => write(writer, 'v2'),
+    );
+
+    expect(await read(reader)).toBe('v2');
+  });
+
+  it('drops the cached copy on a delete message from an older version', async () => {
+    const writer = await createCacheComponentsInstance();
+    const reader = await createCacheComponentsInstance();
+    await write(writer, 'v2');
+    const v2 = hoisted.store.get('test:' + KEY)!;
+    await write(writer, 'v1');
+    expect(await read(reader)).toBe('v1');
+    hoisted.store.set('test:' + KEY, v2);
+    expect(await read(reader)).toBe('v1');
+
+    publishRaw(
+      'test::sync-channel:__cacheComponents_inMemoryDeduplicationCache__',
+      [KEY],
+    );
+
+    expect(await read(reader)).toBe('v2');
   });
 
   it('does not serve an in-memory copy on another instance after updateTags()', async () => {
