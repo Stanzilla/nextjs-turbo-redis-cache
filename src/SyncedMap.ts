@@ -45,6 +45,11 @@ type SyncedMapOptions<V, I extends MapIndex<V>> = {
   subscriptions?: RedisSubscriptions;
   /** Creates an empty index. A reload fills a new one next to the new map. */
   createIndex?: () => I;
+  /**
+   * Checks a value read from the hash or the sync channel. A value that fails
+   * is skipped, so one bad field does not keep the map from becoming ready.
+   */
+  isValidValue?: (value: unknown) => value is V;
 };
 
 type Change<V> = { value: V } | 'deleted';
@@ -113,6 +118,7 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
   private filterKeys: (key: string) => boolean;
   private resyncIntervalMs?: number;
   private customizedSync?: CustomizedSync;
+  private isValidValue: (value: unknown) => value is V;
 
   private isSetUp = false;
   private lastSetupError: unknown;
@@ -136,6 +142,8 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
     this.filterKeys = options.filterKeys;
     this.resyncIntervalMs = options.resyncIntervalMs;
     this.customizedSync = options.customizedSync;
+    this.isValidValue =
+      options.isValidValue ?? ((value: unknown): value is V => true);
 
     this.map = new Map<string, V>();
     this.createIndex = options.createIndex;
@@ -223,6 +231,9 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
     // with one long rebuild at the swap.
     const loadedIndex = this.createIndex?.();
     this.changesDuringReload = new Map();
+    // Fields that another writer or package version stored in a form that
+    // this version cannot read. They are skipped, not deleted.
+    const skipped: string[] = [];
 
     try {
       do {
@@ -241,13 +252,23 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
         for (let i = 0; i < tuples.length; i += 2) {
           const field = tuples[i];
           if (this.filterKeys(field)) {
-            applyChange(loaded, loadedIndex, field, {
-              value: JSON.parse(tuples[i + 1]),
-            });
+            const value = this.parseValue(tuples[i + 1]);
+            if (value === undefined) {
+              skipped.push(field);
+            } else {
+              applyChange(loaded, loadedIndex, field, { value });
+            }
           }
         }
         cursor = nextCursor;
       } while (cursor !== '0');
+
+      if (skipped.length > 0) {
+        console.warn(
+          `SyncedMap ${this.redisKey} skipped ${skipped.length} malformed field(s), first:`,
+          skipped.slice(0, 5),
+        );
+      }
 
       // The scan can read a field before a change that this instance saw
       // during the scan, so those changes win over the scanned values.
@@ -268,6 +289,17 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
       console.error('Error during initial sync:', error);
       throw error;
     }
+  }
+
+  /** Returns undefined for a value that is not JSON or fails the check. */
+  private parseValue(raw: string): V | undefined {
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    return this.isValidValue(value) ? value : undefined;
   }
 
   /**
@@ -347,9 +379,17 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
     const syncHandler: MessageHandler = (message) => {
       const syncMessage: SyncMessage<V> = JSON.parse(message);
       if (syncMessage.type === 'insert') {
-        if (syncMessage.key !== undefined && syncMessage.value !== undefined) {
-          this.setLocal(syncMessage.key, syncMessage.value);
+        if (syncMessage.key === undefined || syncMessage.value === undefined) {
+          return;
         }
+        if (!this.isValidValue(syncMessage.value)) {
+          console.warn(
+            `SyncedMap ${this.redisKey} skipped a malformed insert message for`,
+            syncMessage.key,
+          );
+          return;
+        }
+        this.setLocal(syncMessage.key, syncMessage.value);
       } else if (syncMessage.type === 'delete') {
         if (syncMessage.keys) {
           for (const key of syncMessage.keys) {
