@@ -1,22 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { DeduplicatedRequestHandler } from '../../../src/DeduplicatedRequestHandler';
-import type { SyncedMap } from '../../../src/SyncedMap';
 
 type Get = (key: string, signal: AbortSignal) => Promise<string | null>;
-
-// DRH only uses get/set/delete of the map, and only locally.
-function localMap() {
-  const map = new Map<string, Promise<string | null>>();
-  return {
-    get: (key: string) => map.get(key),
-    set: async (key: string, value: Promise<string | null>) => {
-      map.set(key, value);
-    },
-    delete: async (key: string) => {
-      map.delete(key);
-    },
-  } as unknown as SyncedMap<Promise<string | null>>;
-}
 
 const signal = AbortSignal.timeout(10_000);
 
@@ -27,7 +12,7 @@ describe('DeduplicatedRequestHandler', () => {
 
   it('shares one request between concurrent callers', async () => {
     const get = vi.fn<Get>(async () => 'value');
-    const handler = new DeduplicatedRequestHandler(get, 1_000, localMap());
+    const handler = new DeduplicatedRequestHandler(get, 1_000);
 
     const results = await Promise.all([
       handler.deduplicatedFunction('k')('k', signal),
@@ -43,7 +28,7 @@ describe('DeduplicatedRequestHandler', () => {
       .fn<Get>()
       .mockRejectedValueOnce(new Error('connection lost'))
       .mockResolvedValueOnce('value');
-    const handler = new DeduplicatedRequestHandler(get, 10_000, localMap());
+    const handler = new DeduplicatedRequestHandler(get, 10_000);
 
     await expect(
       handler.deduplicatedFunction('k')('k', signal),
@@ -58,7 +43,7 @@ describe('DeduplicatedRequestHandler', () => {
   it('the expiry timer of an older seed does not remove a newer seed', async () => {
     vi.useFakeTimers();
     const get = vi.fn<Get>(async () => 'from redis');
-    const handler = new DeduplicatedRequestHandler(get, 100, localMap());
+    const handler = new DeduplicatedRequestHandler(get, 100);
     const read = () => handler.deduplicatedFunction('k')('k', signal);
 
     handler.seedRequestReturn('k', 'v1');
@@ -75,7 +60,7 @@ describe('DeduplicatedRequestHandler', () => {
 
   it('forget() removes only the entry it was given', async () => {
     const get = vi.fn<Get>(async () => 'from redis');
-    const handler = new DeduplicatedRequestHandler(get, 10_000, localMap());
+    const handler = new DeduplicatedRequestHandler(get, 10_000);
     const read = () => handler.deduplicatedFunction('k')('k', signal);
 
     const failedWrite = handler.seedRequestReturn('k', 'v1');

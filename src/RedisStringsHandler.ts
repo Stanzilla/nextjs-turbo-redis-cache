@@ -1,7 +1,13 @@
 import type { RedisClientOptions } from 'redis';
 import { SyncedMap } from './SyncedMap';
-import { createRedisSubscriptions } from './utils/redisSubscriptions';
-import { DeduplicatedRequestHandler } from './DeduplicatedRequestHandler';
+import {
+  createRedisSubscriptions,
+  syncChannelName,
+} from './utils/redisSubscriptions';
+import {
+  DeduplicatedRequestHandler,
+  syncDeduplicationCache,
+} from './DeduplicatedRequestHandler';
 import { debug } from './utils/debug';
 import { CacheValueSerializer, jsonCacheValueSerializer } from './serializer';
 import { resolveCacheEntryTtlSeconds } from './utils/cacheTtl';
@@ -285,7 +291,7 @@ export default class RedisStringsHandler {
   private client!: Client;
   private sharedTagsMap: SyncedMap<string[]>;
   private revalidatedTagsMap: SyncedMap<number>;
-  private inMemoryDeduplicationCache: SyncedMap<Promise<string | null>>;
+  private invalidateDeduplicationCache: (keys: string[]) => Promise<void>;
   private getTimeoutMs: number;
   private writeTimeoutMs: number;
   private redisGet: AbortableGet;
@@ -396,25 +402,18 @@ export default class RedisStringsHandler {
           Math.random() * (avgResyncIntervalMs / 10),
       });
 
-      this.inMemoryDeduplicationCache = new SyncedMap({
-        client: this.client,
-        subscriptions,
-        keyPrefix,
-        redisKey: 'inMemoryDeduplicationCache',
-        database,
-        querySize: revalidateTagQuerySize,
-        filterKeys,
-        customizedSync: {
-          withoutRedisHashmap: true,
-          withoutSetSync: true,
-        },
-      });
-
       const redisGet = createAbortableGet(this.client);
       this.redisDeduplicationHandler = new DeduplicatedRequestHandler(
         redisGet,
         inMemoryCachingTime,
-        this.inMemoryDeduplicationCache,
+      );
+      this.invalidateDeduplicationCache = syncDeduplicationCache(
+        this.redisDeduplicationHandler,
+        {
+          client: this.client,
+          subscriptions,
+          channel: syncChannelName(keyPrefix, 'inMemoryDeduplicationCache'),
+        },
       );
       this.redisGet = redisGet;
       this.deduplicatedRedisGet =
@@ -737,7 +736,7 @@ export default class RedisStringsHandler {
       // This also removes the seed on this instance, so its next read gets the new value from redis.
       const invalidateDeduplicationCacheOperation =
         this.redisGetDeduplication && this.inMemoryCachingTime > 0
-          ? setOperation.then(() => this.inMemoryDeduplicationCache.delete(key))
+          ? setOperation.then(() => this.invalidateDeduplicationCache([key]))
           : undefined;
 
       debug(
@@ -868,7 +867,7 @@ export default class RedisStringsHandler {
 
         // also delete entries from in-memory deduplication cache if they get revalidated
         if (this.redisGetDeduplication && this.inMemoryCachingTime > 0) {
-          writes.push(this.inMemoryDeduplicationCache.delete(redisKeys));
+          writes.push(this.invalidateDeduplicationCache(redisKeys));
         }
 
         // prepare deletion of entries from shared tags map if they get revalidated so that the map will not grow indefinitely
