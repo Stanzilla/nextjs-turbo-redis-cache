@@ -6,7 +6,8 @@ import { compareAndUnlink } from '../../../src/utils/compareAndUnlink';
 import { syncChannelName } from '../../../src/utils/redisSubscriptions';
 
 // Runs the Lua scripts on a real Redis. The unit tests use mocks that only
-// imitate the scripts.
+// imitate the scripts. The suite also runs on a cluster-mode server, which
+// rejects a command whose keys are in different hash slots.
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 const HASH = '__tags__';
 
@@ -29,9 +30,11 @@ describe('Lua scripts on a real Redis', () => {
 
   afterEach(async () => {
     await Promise.all(maps.map((map) => map.close()));
+    // One key per UNLINK: a cluster rejects keys in different slots.
     for await (const keys of client.scanIterator({ MATCH: `${prefix}*` })) {
-      const list = ([] as string[]).concat(keys);
-      if (list.length > 0) await client.unlink(list);
+      await Promise.all(
+        ([] as string[]).concat(keys).map((key) => client.unlink(key)),
+      );
     }
     await Promise.all([client.disconnect(), listener.disconnect()]);
     vi.unstubAllEnvs();
@@ -110,6 +113,48 @@ describe('Lua scripts on a real Redis', () => {
         expect([...map.entries()].map(([key]) => key)).toEqual(['kept']);
       }
     });
+  });
+
+  it('keeps the field of a key that a writer stores again with the same tags during the cleanup', async () => {
+    await client.hSet(`${prefix}${HASH}`, { page: '["t"]', gone: '["t"]' });
+    const deletes = await recordDeletes();
+
+    // The writer runs once, after the reload read the hash and before the
+    // cleanup changes it. It writes the value that the hash already holds.
+    let written = false;
+    const writer = withBeforeEval(async () => {
+      if (written) return;
+      written = true;
+      await client.set(`${prefix}page`, 'value');
+      await client.hSet(`${prefix}${HASH}`, 'page', '["t"]');
+    });
+    const map = startMap({}, writer);
+    await map.waitUntilReady();
+
+    expect(await client.hGetAll(`${prefix}${HASH}`)).toEqual({
+      page: '["t"]',
+    });
+    await vi.waitFor(() => expect(deletes.flat()).toContain('gone'));
+    await vi.waitFor(() => {
+      expect(map.get('page')).toEqual(['t']);
+      expect(map.has('gone')).toBe(false);
+    });
+  });
+
+  it('removes the field of a cache key that expires', async () => {
+    const deletes = await recordDeletes();
+    const map = startMap();
+    await map.waitUntilReady();
+
+    await client.set(`${prefix}page`, 'value', { PX: 100 });
+    await map.set('page', ['t']);
+
+    await vi.waitFor(
+      async () => expect(await client.hKeys(`${prefix}${HASH}`)).toEqual([]),
+      { timeout: 2_000 },
+    );
+    await vi.waitFor(() => expect(deletes).toEqual([['page']]));
+    await vi.waitFor(() => expect(map.has('page')).toBe(false));
   });
 
   it('keeps an expired field that a writer changed after the reload read it', async () => {
