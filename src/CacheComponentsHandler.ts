@@ -167,6 +167,9 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
   private deduplicatedRedisGet: (key: string) => AbortableGet;
   private redisGetDeduplication: boolean;
   private redisConnectionDeferred: boolean;
+  // A get() of a key waits for a set() of that key on this instance, as in
+  // DefaultCacheHandler. Then concurrent requests do not render it again.
+  private pendingSets = new Map<string, Promise<void>>();
 
   constructor(options: CreateCacheComponentsHandlerOptions) {
     const {
@@ -291,6 +294,15 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     // We prepend our keyPrefix for multi-tenant isolation
     const redisKey = `${this.keyPrefix}${cacheKey}`;
 
+    const pendingSet = this.pendingSets.get(cacheKey);
+    if (pendingSet) {
+      // A failed or slow set() is a normal read of the value in Redis.
+      await untilDeadline(
+        pendingSet,
+        AbortSignal.timeout(this.getTimeoutMs),
+      ).catch(() => undefined);
+    }
+
     try {
       await this.assertClientIsReady(this.getTimeoutMs);
       if (this.isClientUnavailable()) {
@@ -399,6 +411,26 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
   }
 
   async set(
+    cacheKey: string,
+    pendingEntry: Promise<CacheComponentsEntry>,
+  ): Promise<void> {
+    let resolvePending!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      resolvePending = resolve;
+    });
+    this.pendingSets.set(cacheKey, pending);
+    try {
+      await this.writeEntry(cacheKey, pendingEntry);
+    } finally {
+      resolvePending();
+      // A later set() of the same key can have replaced the entry.
+      if (this.pendingSets.get(cacheKey) === pending) {
+        this.pendingSets.delete(cacheKey);
+      }
+    }
+  }
+
+  private async writeEntry(
     cacheKey: string,
     pendingEntry: Promise<CacheComponentsEntry>,
   ): Promise<void> {
