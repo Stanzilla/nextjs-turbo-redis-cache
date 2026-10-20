@@ -7,7 +7,7 @@ class HashMockClient {
   hDelCalls: string[][] = [];
   evalBatches: string[][] = [];
   publishes: string[] = [];
-  /** Runs when the cleanup checks if the cache keys exist. */
+  /** Runs in the take script, like a writer that stores the key during the cleanup. */
   beforeKeyCheck?: () => void;
   evalError?: Error;
   /** Runs after the script and before its reply, like a peer write. */
@@ -91,21 +91,44 @@ class HashMockClient {
     return 1;
   }
 
-  /** Emulates the cleanup script: the check, HDEL and PUBLISH are one step. */
+  async exists(key: string) {
+    return this.stringKeys.includes(key) ? 1 : 0;
+  }
+
+  /**
+   * Emulates the take script (remove the fields, publish the delete, return
+   * the pairs) and the restore script (HSETNX, publish the insert).
+   */
   async eval(
-    _script: string,
-    {
-      keys,
-      arguments: [channel, ...fields],
-    }: { keys: string[]; arguments: string[] },
+    script: string,
+    { arguments: [channel, ...args] }: { keys: string[]; arguments: string[] },
   ) {
+    if (script.includes('HSETNX')) {
+      for (let i = 0; i < args.length; i += 2) {
+        if (this.hash.has(args[i])) continue;
+        this.hash.set(args[i], args[i + 1]);
+        await this.publish(
+          channel,
+          JSON.stringify({
+            type: 'insert',
+            key: args[i],
+            value: JSON.parse(args[i + 1]),
+          }),
+        );
+      }
+      return null;
+    }
     if (this.evalError) throw this.evalError;
-    this.evalBatches.push(fields);
+    this.evalBatches.push(args);
     this.beforeKeyCheck?.();
-    const removed = fields.filter(
-      (field, i) =>
-        !this.stringKeys.includes(keys[i + 1]) && this.hash.delete(field),
-    );
+    const taken: string[] = [];
+    for (const field of args) {
+      const value = this.hash.get(field);
+      if (value === undefined) continue;
+      this.hash.delete(field);
+      taken.push(field, value);
+    }
+    const removed = taken.filter((_, i) => i % 2 === 0);
     if (removed.length > 0) {
       await this.publish(
         channel,
@@ -113,7 +136,7 @@ class HashMockClient {
       );
     }
     await this.afterScript?.();
-    return removed;
+    return taken;
   }
 }
 
