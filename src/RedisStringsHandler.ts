@@ -311,7 +311,6 @@ export default class RedisStringsHandler {
   private deduplicatedRedisGet: (key: string) => AbortableGet;
   private keyPrefix: string;
   private redisGetDeduplication: boolean;
-  private inMemoryCachingTime: number;
   private defaultStaleAge: number;
   private estimateExpireAge: (staleAge: number) => number;
   private errorBudget: ErrorBudget;
@@ -349,7 +348,6 @@ export default class RedisStringsHandler {
     try {
       this.keyPrefix = keyPrefix;
       this.redisGetDeduplication = redisGetDeduplication;
-      this.inMemoryCachingTime = inMemoryCachingTime;
       this.defaultStaleAge = defaultStaleAge;
       this.estimateExpireAge = estimateExpireAge;
       this.getTimeoutMs = getTimeoutMs;
@@ -737,10 +735,10 @@ export default class RedisStringsHandler {
       // When the new value is in redis, remove the old copy from the in-memory deduplication cache
       // of every instance. Otherwise the other instances serve the old value for up to inMemoryCachingTime.
       // This also removes the seed on this instance, so its next read gets the new value from redis.
-      const invalidateDeduplicationCacheOperation =
-        this.redisGetDeduplication && this.inMemoryCachingTime > 0
-          ? setOperation.then(() => this.invalidateDeduplicationCache([key]))
-          : undefined;
+      // Publish also when this instance has no in-memory cache: peers can have other settings.
+      const invalidateDeduplicationCacheOperation = setOperation.then(() =>
+        this.invalidateDeduplicationCache([key]),
+      );
 
       debug(
         'blue',
@@ -871,10 +869,9 @@ export default class RedisStringsHandler {
           ),
         );
 
-        // also delete entries from in-memory deduplication cache if they get revalidated
-        if (this.redisGetDeduplication && this.inMemoryCachingTime > 0) {
-          writes.push(this.invalidateDeduplicationCache(redisKeys));
-        }
+        // also delete entries from the in-memory deduplication cache of every instance, also when
+        // this instance has no in-memory cache: peers can have other settings
+        writes.push(this.invalidateDeduplicationCache(redisKeys));
 
         // prepare deletion of entries from shared tags map if they get revalidated so that the map will not grow indefinitely
         writes.push(this.sharedTagsMap.delete(redisKeys));
