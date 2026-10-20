@@ -9,7 +9,7 @@ Two handler implementations exist side by side:
 | **RedisStringsHandler**    | Legacy `cacheHandler` (Next.js 15)                     | `src/RedisStringsHandler.ts`    |
 | **CacheComponentsHandler** | `cacheHandlers.default` (Next.js 16+ Cache Components) | `src/CacheComponentsHandler.ts` |
 
-Both follow the same fundamental pattern – store serialized data in Redis strings, maintain two in-memory hash maps for tags, and synchronize those maps across instances – but differ in the data shapes they receive from Next.js and in some performance optimizations.
+Both follow the same fundamental pattern – store serialized data in Redis strings, maintain in-memory hash maps for tags (two in RedisStringsHandler, one in CacheComponentsHandler), and synchronize those maps across instances – but differ in the data shapes they receive from Next.js and in some performance optimizations.
 
 ---
 
@@ -138,13 +138,13 @@ sequenceDiagram
 
 ### 3. Keyspace Notifications (eviction / expiry cleanup)
 
-When Redis evicts or expires a cache key, the corresponding entry must be removed from the `sharedTagsMap` as well – otherwise the map would grow indefinitely. `SyncedMap` subscribes to `__keyevent@<db>__:evicted` and `__keyevent@<db>__:expired` and automatically deletes matching entries.
+When Redis evicts or expires a cache key, the corresponding entry must be removed from the `sharedTagsMap` as well – otherwise the map would grow indefinitely. `SyncedMap` subscribes to `__keyevent@<db>__:evicted` and `__keyevent@<db>__:expired`. For each event it runs the orphan cleanup script for that one key: the script deletes the hash field only when the key is still absent, and publishes the delete in the same step. The event can arrive after a writer stored the key again, so a plain `HDEL` would remove the new field. The script publishes only fields that `HDEL` removed, so many instances that get the same event send one delete message. Local maps change only when the delete message arrives on the sync channel, in order with the inserts. Maps whose fields are not cache keys (`revalidatedTagsMap`) do not subscribe to these events.
 
 This requires Redis to be configured with `notify-keyspace-events Exe`.
 
 ```mermaid
 flowchart LR
-    REDIS["Redis expires key\n/products/42"] -->|"keyevent notification"| SM["SyncedMap\ndeletes '/products/42'\nfrom local map + hash"]
+    REDIS["Redis expires key\n/products/42"] -->|"keyevent notification"| SM["SyncedMap\nEVAL: HDEL + PUBLISH delete\nonly if the key is absent"] -->|"sync channel"| ALL["Every instance\ndeletes '/products/42'\nfrom its local map"]
 ```
 
 ### Why not store tags inside the Redis string value?
@@ -322,19 +322,21 @@ flowchart TD
 
     C --> SEED["Seed deduplication cache\n(if redisGetDeduplication enabled)"]
 
-    E --> F{Tags changed?}
-    F -->|"Yes (or new)"| G["sharedTagsMap.set(key, tags)\n→ HSET + PUBLISH"]
-    F -->|"No change"| H["Skip tag update"]
+    E --> F{Handler and tags}
+    F -->|"RedisStringsHandler, tagged"| G["sharedTagsMap.set(key, tags)\n→ HSET + PUBLISH\n(after every SET, also when the tags did not change)"]
+    F -->|"RedisStringsHandler, untagged"| H["sharedTagsMap.delete(key)\nif the old entry had tags"]
+    F -->|"CacheComponentsHandler"| H2["No tag index"]
 
     G --> I["Done"]
     H --> I
+    H2 --> I
 ```
 
 ### Key Details
 
 1. **Tag extraction** (RedisStringsHandler): For `APP_PAGE` and `APP_ROUTE`, tags are encoded in the `x-next-cache-tags` header as a comma-separated string. The handler splits this and merges with `ctx.tags`.
 
-2. **Tag index** (RedisStringsHandler): After the Redis `SET` succeeds, the handler writes the tags of the key to `sharedTagsMap`. CacheComponentsHandler keeps no tag index, because `get()` checks the tags stored in each entry against `revalidatedTagsMap`.
+2. **Tag index** (RedisStringsHandler): After the Redis `SET` succeeds, the handler writes the tags of the key to `sharedTagsMap`. It writes them after every `SET`, also when the tags did not change, because the orphan cleanup of another instance can remove the field between the `SET` and the write. An untagged entry removes the membership of the entry it replaces. CacheComponentsHandler keeps no tag index, because `get()` checks the tags stored in each entry against `revalidatedTagsMap`.
 
 3. **Dedup cache seeding** (both handlers): The serialized value is immediately seeded into the `DeduplicatedRequestHandler`, so a following `get()` for the same key can be served from memory.
 
@@ -419,7 +421,7 @@ Returning `undefined` when both `cacheControl.expire` and `revalidate` are absen
 
 **Tag-manifest keys vs `SyncedMap` orphan cleanup**
 
-`cleanupKeysNotInRedis()` runs one Lua script for each batch of map keys. The script HDELs each hash field whose cache key does not exist, and publishes the delete message, in the same step as the check. A failed cleanup is logged and does not block readiness. That is correct for `sharedTagsMap` (cache key → tags). It is wrong for `revalidatedTagsMap` (tag name → `{ stale, expired }`): tag names are never top-level keys, so startup or the hourly resync would wipe every invalidation and publish the delete fleet-wide. Tag-manifest maps set `customizedSync.withoutOrphanCleanup`.
+`cleanupKeysNotInRedis()` runs one Lua script for each batch of map keys. The script HDELs each hash field whose cache key does not exist, and publishes the delete message, in the same step as the check. A failed cleanup is logged and does not block readiness. That is correct for `sharedTagsMap` (cache key → tags). It is wrong for `revalidatedTagsMap` (tag name → `{ stale, expired }`): tag names are never top-level keys, so startup or the hourly resync would wipe every invalidation and publish the delete fleet-wide. Tag-manifest maps set `customizedSync.fieldsAreNotRedisKeys`, which turns off the cleanup and the keyevent subscription.
 
 **Dedup cache vs Redis UNLINK**
 
