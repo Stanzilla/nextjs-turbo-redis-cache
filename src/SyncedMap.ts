@@ -50,6 +50,11 @@ type SyncedMapOptions<V, I extends MapIndex<V>> = {
    * is skipped, so one bad field does not keep the map from becoming ready.
    */
   isValidValue?: (value: unknown) => value is V;
+  /**
+   * A value that is no longer needed. Each reload removes such fields from
+   * the hash, but only while they still hold the value that it read.
+   */
+  isExpiredValue?: (value: V) => boolean;
 };
 
 type Change<V> = { value: V } | 'deleted';
@@ -95,6 +100,24 @@ if #removed > 0 then
 end
 return removed
 `;
+/**
+ * KEYS[1] is the hash, ARGV[1] is the sync channel, and the next arguments
+ * are pairs of a field and the value that the reload read. A field that a
+ * writer changed since then is kept.
+ */
+const DELETE_FIELDS_IF_UNCHANGED = `
+local removed = {}
+for i = 2, #ARGV, 2 do
+  if redis.call('HGET', KEYS[1], ARGV[i]) == ARGV[i + 1] then
+    redis.call('HDEL', KEYS[1], ARGV[i])
+    removed[#removed + 1] = ARGV[i]
+  end
+end
+if #removed > 0 then
+  redis.call('PUBLISH', ARGV[1], cjson.encode({ type = 'delete', keys = removed }))
+end
+return removed
+`;
 const READY_TIMEOUT_MS = 30_000;
 
 type ReadyWaiter = {
@@ -119,6 +142,8 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
   private resyncIntervalMs?: number;
   private customizedSync?: CustomizedSync;
   private isValidValue: (value: unknown) => value is V;
+  // Method syntax, so that SyncedMap<V> stays assignable to SyncedMap<unknown>.
+  private isExpiredValue?(value: V): boolean;
 
   private isSetUp = false;
   private lastSetupError: unknown;
@@ -144,6 +169,7 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
     this.customizedSync = options.customizedSync;
     this.isValidValue =
       options.isValidValue ?? ((value: unknown): value is V => true);
+    this.isExpiredValue = options.isExpiredValue;
 
     this.map = new Map<string, V>();
     this.createIndex = options.createIndex;
@@ -234,6 +260,7 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
     // Fields that another writer or package version stored in a form that
     // this version cannot read. They are skipped, not deleted.
     const skipped: string[] = [];
+    const expired: [field: string, raw: string][] = [];
 
     try {
       do {
@@ -257,6 +284,9 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
               skipped.push(field);
             } else {
               applyChange(loaded, loadedIndex, field, { value });
+              if (this.isExpiredValue?.(value)) {
+                expired.push([field, tuples[i + 1]]);
+              }
             }
           }
         }
@@ -284,6 +314,7 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
       if (!this.customizedSync?.fieldsAreNotRedisKeys) {
         await this.cleanupKeysNotInRedis();
       }
+      await this.deleteExpiredFields(expired);
     } catch (error) {
       this.changesDuringReload = undefined;
       console.error('Error during initial sync:', error);
@@ -342,6 +373,29 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
         arguments: [this.syncChannel, ...fields],
       }),
     );
+  }
+
+  /**
+   * Best-effort, as cleanupKeysNotInRedis(). The script publishes the delete,
+   * and the subscriber changes the local map in channel order.
+   */
+  private async deleteExpiredFields(expired: [string, string][]) {
+    try {
+      for (let i = 0; i < expired.length; i += this.querySize) {
+        await redisErrorHandler(
+          `SyncedMap.deleteExpiredFields(), operation: EVAL ${this.keyPrefix}${this.redisKey}`,
+          this.client.eval(DELETE_FIELDS_IF_UNCHANGED, {
+            keys: [this.keyPrefix + this.redisKey],
+            arguments: [
+              this.syncChannel,
+              ...expired.slice(i, i + this.querySize).flat(),
+            ],
+          }),
+        );
+      }
+    } catch (error) {
+      console.error('Error during deletion of expired fields:', error);
+    }
   }
 
   private setupPeriodicResync() {
