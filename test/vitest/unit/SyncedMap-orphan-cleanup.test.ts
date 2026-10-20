@@ -99,11 +99,10 @@ class HashMockClient {
     if (this.evalError) throw this.evalError;
     this.evalBatches.push(fields);
     this.beforeKeyCheck?.();
-    const removed = fields.filter((field, i) => {
-      if (this.stringKeys.includes(keys[i + 1])) return false;
-      this.hash.delete(field);
-      return true;
-    });
+    const removed = fields.filter(
+      (field, i) =>
+        !this.stringKeys.includes(keys[i + 1]) && this.hash.delete(field),
+    );
     if (removed.length > 0) {
       await this.publish(
         channel,
@@ -263,6 +262,8 @@ describe('SyncedMap keyevents', () => {
     await map.close();
   });
 
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
   it('still removes an expired cache key from a map keyed by cache keys', async () => {
     const client = new HashMockClient();
     const map = createMap(client);
@@ -270,9 +271,25 @@ describe('SyncedMap keyevents', () => {
     await map.set('posts', 1);
 
     await client.deliver('__keyevent@0__:expired', 'app:posts');
+    await settle();
 
     expect(map.get('posts')).toBeUndefined();
     expect(client.hash.has('posts')).toBe(false);
+    await map.close();
+  });
+
+  it('keeps the field when the key is stored again before the event arrives', async () => {
+    const client = new HashMockClient();
+    const map = createMap(client);
+    await map.waitUntilReady();
+    await map.set('posts', 1);
+    client.stringKeys = ['app:posts'];
+
+    await client.deliver('__keyevent@0__:expired', 'app:posts');
+    await settle();
+
+    expect(client.hash.get('posts')).toBe('1');
+    expect(map.get('posts')).toBe(1);
     await map.close();
   });
 });
