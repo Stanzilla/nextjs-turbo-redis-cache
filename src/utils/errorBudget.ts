@@ -39,19 +39,43 @@ export class ErrorBudget {
   }
 }
 
+// The longest connect attempt with the node-redis default connectTimeout.
+const CONNECT_ATTEMPT_MAX_MS = 5_000;
+
+/**
+ * node-redis keeps the socket of a connect attempt that ends after
+ * disconnect(), and redis 4 cannot close that socket later. So wait until a
+ * pending attempt ends before the disconnect.
+ */
+function connectAttemptEnded(client: Client): Promise<void> {
+  if (!client.isOpen || client.isReady) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      client.off('ready', done);
+      client.off('error', done);
+      resolve();
+    };
+    const timer = setTimeout(done, CONNECT_ATTEMPT_MAX_MS);
+    timer.unref?.();
+    client.once('ready', done);
+    client.once('error', done);
+  });
+}
+
 export async function closeClient(client: Client | undefined): Promise<void> {
-  // node-redis can finish a pending connect() after disconnect(), and the
-  // client is then open again.
-  client?.once('ready', () => void closeClient(client));
+  if (!client) return;
+  await connectAttemptEnded(client);
   try {
-    await client?.disconnect();
+    await client.disconnect();
   } catch {
-    // The client was not created or is already closed.
+    // The client is already closed.
   }
 }
 
 export function disconnectAndExit(client: Client | undefined): void {
-  void closeClient(client);
+  // The process exits soon, so a pending connect attempt cannot leak.
+  client?.disconnect().catch(() => {});
   setTimeout(() => {
     process.exit(1);
   }, 500);

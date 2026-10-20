@@ -1,4 +1,5 @@
 import type { Client } from './redisConnection';
+import { closeClient } from './errorBudget';
 import { createRetrier } from './retry';
 
 export type MessageHandler = (message: string, channel: string) => void;
@@ -41,13 +42,12 @@ export function syncChannelName(keyPrefix: string, redisKey: string): string {
 }
 
 async function disconnect(client: Client | undefined) {
-  try {
-    // A delayed error from the old socket must not reach the listeners.
-    client?.removeAllListeners('error');
-    await client?.disconnect();
-  } catch {
-    // expected during outage
-  }
+  // A delayed error from the old socket must not reach the listeners, and
+  // must not be an unhandled 'error' event while closeClient waits.
+  if (!client) return;
+  client.removeAllListeners('error');
+  client.on('error', () => {});
+  await closeClient(client);
 }
 
 async function assertKeyspaceEventsEnabled(client: Client) {
@@ -120,10 +120,11 @@ export function createRedisSubscriptions(client: Client): RedisSubscriptions {
   const replaceClient = async () => {
     // Forcibly tear down the old subscriber so its internal reconnect loop
     // cannot come back to life once Redis recovers. quit() waits for the
-    // server and can silently fail during an outage.
+    // server and can silently fail during an outage. The new client does
+    // not wait for this: the old client can still have a connect attempt.
     const old = current;
     current = undefined;
-    await disconnect(old?.client);
+    void disconnect(old?.client);
     const connection: Connection = {
       client: client.duplicate(),
       subscribed: new Set(),
