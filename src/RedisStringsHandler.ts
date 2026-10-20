@@ -247,6 +247,10 @@ export type CreateRedisStringsHandlerOptions = {
 // These tags are created internally by Next.js for route-based invalidation
 const NEXT_CACHE_IMPLICIT_TAG_ID = '_N_T_';
 
+// The default Next.js expireTime. An entry that is older than a tag record is
+// not served, so a record must live as long as an entry can.
+const TAG_RECORD_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
+
 // Next.js 16.4+ keys route entries as /route-cache/<kind>/<sha256(sourceRoute)>/$/<path>
 // (next/dist/server/lib/route-cache-key.js). Older versions use /<path> as the key,
 // and that path can itself start with /route-cache/, so match the full shape.
@@ -401,6 +405,8 @@ export default class RedisStringsHandler {
         resyncIntervalMs: resyncDelay(avgResyncIntervalMs, 'after'),
         isValidValue: (value): value is number =>
           typeof value === 'number' && Number.isFinite(value),
+        isExpiredValue: (revalidatedAt) =>
+          revalidatedAt < Date.now() - TAG_RECORD_RETENTION_MS,
       });
 
       const redisGet = createAbortableGet(this.client);
@@ -550,59 +556,57 @@ export default class RedisStringsHandler {
         return null;
       }
 
-      if (ctx.kind === 'FETCH') {
-        const combinedTags = new Set([
-          ...(ctx?.softTags || []),
-          ...(ctx?.tags || []),
-        ]);
+      // A write can race revalidateTag() and reach Redis after its UNLINK.
+      // The tag record still marks such an entry as stale. FETCH entries also
+      // get the implicit tags of their page from ctx.
+      const combinedTags = new Set([
+        ...(cacheEntry.tags || []),
+        ...((ctx.kind === 'FETCH' && ctx.softTags) || []),
+        ...((ctx.kind === 'FETCH' && ctx.tags) || []),
+      ]);
 
-        if (combinedTags.size === 0) {
-          return cacheEntry;
-        }
+      // INFO: implicit tags (revalidate of nested fetch in api route/page on revalidatePath call of the page/api route). See revalidateTag() for more information
+      //
+      // This code checks if any of the cache tags associated with this entry (normally the internal tag of the parent page/api route containing the fetch request)
+      // have been revalidated since the entry was last modified. If any tag was revalidated more recently than the entry's
+      // lastModified timestamp, then the cached content is considered stale (therefore return null) and should be removed.
+      for (const tag of combinedTags) {
+        // Get the last revalidation time for this tag from our revalidatedTagsMap
+        const revalidationTime = this.revalidatedTagsMap.get(tag);
 
-        // INFO: implicit tags (revalidate of nested fetch in api route/page on revalidatePath call of the page/api route). See revalidateTag() for more information
-        //
-        // This code checks if any of the cache tags associated with this entry (normally the internal tag of the parent page/api route containing the fetch request)
-        // have been revalidated since the entry was last modified. If any tag was revalidated more recently than the entry's
-        // lastModified timestamp, then the cached content is considered stale (therefore return null) and should be removed.
-        for (const tag of combinedTags) {
-          // Get the last revalidation time for this tag from our revalidatedTagsMap
-          const revalidationTime = this.revalidatedTagsMap.get(tag);
+        // If we have a revalidation time for this tag and it's more recent than when
+        // this cache entry was last modified, the entry is stale
+        if (revalidationTime && revalidationTime > cacheEntry.lastModified) {
+          const redisKey = this.keyPrefix + key;
 
-          // If we have a revalidation time for this tag and it's more recent than when
-          // this cache entry was last modified, the entry is stale
-          if (revalidationTime && revalidationTime > cacheEntry.lastModified) {
-            const redisKey = this.keyPrefix + key;
-
-            // Remove only this key, and only while it still holds the stale
-            // value: a concurrent set() can already have written the
-            // replacement. Keep the tag record in revalidatedTagsMap, because
-            // every other entry under the tag needs it to see that it is
-            // stale. Keep the sharedTagsMap membership too: the replacement
-            // can own it, and the orphan cleanup removes it once the key is gone.
-            void compareAndUnlink(
-              this.client,
-              redisKey,
-              serializedCacheEntry,
-            ).catch((err) => {
-              console.error(
-                'Error occurred while unlinking stale data. Error was:',
-                err,
-              );
-            });
-
-            debug(
-              'green',
-              'RedisStringsHandler.get() found revalidation time for tag. Cache entry is stale and will be deleted and "null" will be returned.',
-              tag,
-              redisKey,
-              revalidationTime,
-              cacheEntry,
+          // Remove only this key, and only while it still holds the stale
+          // value: a concurrent set() can already have written the
+          // replacement. Keep the tag record in revalidatedTagsMap, because
+          // every other entry under the tag needs it to see that it is
+          // stale. Keep the sharedTagsMap membership too: the replacement
+          // can own it, and the orphan cleanup removes it once the key is gone.
+          void compareAndUnlink(
+            this.client,
+            redisKey,
+            serializedCacheEntry,
+          ).catch((err) => {
+            console.error(
+              'Error occurred while unlinking stale data. Error was:',
+              err,
             );
+          });
 
-            // Return null to indicate no valid cache entry was found
-            return null;
-          }
+          debug(
+            'green',
+            'RedisStringsHandler.get() found revalidation time for tag. Cache entry is stale and will be deleted and "null" will be returned.',
+            tag,
+            redisKey,
+            revalidationTime,
+            cacheEntry,
+          );
+
+          // Return null to indicate no valid cache entry was found
+          return null;
         }
       }
 
@@ -828,26 +832,20 @@ export default class RedisStringsHandler {
       // all and a timeout does not skip the writes after it.
       const writes: Promise<unknown>[] = [];
 
+      // Record every tag. The unlink below cannot find a FETCH entry that
+      // only gets an implicit page tag (_N_T_...) from ctx at read time, or a
+      // write that reaches Redis after the unlink. get() compares the entry
+      // with this record and drops it when the entry is older.
+      const now = Date.now();
       for (const tag of tags) {
-        // INFO: implicit tags (revalidate of nested fetch in api route/page on revalidatePath call of the page/api route)
-        //
-        // Invalidation logic for fetch requests that are related to a invalidated page.
-        // revalidateTag is called for the page tag (_N_T_...) and the fetch request needs to be invalidated as well
-        // unfortunately this is not possible since the revalidateTag is not called with any data that would allow us to find the cache entry of the fetch request
-        // in case of a fetch request get method call, the get method of the cache handler is called with some information about the pages/routes the fetch request is inside
-        // therefore we only mark the page/route as stale here (with help of the revalidatedTagsMap)
-        // and delete the cache entry of the fetch request on the next request to the get function
-        if (tag.startsWith(NEXT_CACHE_IMPLICIT_TAG_ID)) {
-          const now = Date.now();
-          debug(
-            'red',
-            'RedisStringsHandler.revalidateTag() set revalidation time for tag',
-            tag,
-            'to',
-            now,
-          );
-          writes.push(this.revalidatedTagsMap.set(tag, now));
-        }
+        debug(
+          'red',
+          'RedisStringsHandler.revalidateTag() set revalidation time for tag',
+          tag,
+          'to',
+          now,
+        );
+        writes.push(this.revalidatedTagsMap.set(tag, now));
       }
 
       const keysToDelete = this.keysWithAnyTag(tags);
