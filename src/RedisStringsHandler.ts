@@ -674,6 +674,9 @@ export default class RedisStringsHandler {
       cacheControl?: CacheControl; // Version 15.0.3+
     },
   ) {
+    // Errors before the write come from the value serializer. The error
+    // budget counts only Redis failures, so it does not count them.
+    let writing = false;
     try {
       if (
         data !== null &&
@@ -717,6 +720,7 @@ export default class RedisStringsHandler {
       };
       const serializedCacheEntry =
         await this.valueSerializer.serialize(cacheEntry);
+      writing = true;
 
       // pre seed data into deduplicated get client. This will reduce redis load by not requesting
       // the same value from redis which was just set. It also replaces a cached miss, so that reads
@@ -807,7 +811,7 @@ export default class RedisStringsHandler {
         'RedisStringsHandler.set() Error occurred while setting cache entry. The original error was:',
         error,
       );
-      this.errorBudget.record(error, 'RedisStringsHandler.set()');
+      if (writing) this.errorBudget.record(error, 'RedisStringsHandler.set()');
       throw error;
     }
   }
