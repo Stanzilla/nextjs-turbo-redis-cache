@@ -1,4 +1,25 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
+
+/**
+ * Reloads the page until the locator text is not `before`. A background
+ * refresh has no fixed duration, so a fixed wait is either slow or flaky.
+ */
+async function reloadUntilChanged(
+  page: Page,
+  locator: Locator,
+  before: string | null,
+) {
+  await expect
+    .poll(
+      async () => {
+        await page.reload();
+        await expect(locator).toBeVisible();
+        return locator.textContent();
+      },
+      { timeout: 30_000, intervals: [500, 1000, 2000] },
+    )
+    .not.toBe(before);
+}
 
 // These tests assume the Cache Components Next.js app is already running on the same origin as baseURL.
 // Recommended:
@@ -84,10 +105,7 @@ test.describe('Cache Lab (Cache Components)', () => {
     // Revalidate can be SWR; allow either immediate refresh or stale served,
     // but the value should eventually change on subsequent reloads.
     if (maybeStaleCreatedAt === afterUpdateCreatedAt) {
-      // give background refresh some time
-      await page.waitForTimeout(4000);
-      await page.reload();
-      await expect(createdAt).toBeVisible();
+      await reloadUntilChanged(page, createdAt, afterUpdateCreatedAt);
     }
 
     expect(await createdAt.textContent()).not.toBe(afterUpdateCreatedAt);
@@ -191,11 +209,7 @@ test.describe('Cache Lab (Cache Components)', () => {
       expect(afterRevalidateValue).toBe(beforeValue);
     }
 
-    await page.waitForTimeout(5000);
-    await page.reload();
-    await expect(computedAt).toBeVisible();
-
-    expect(await computedAt.textContent()).not.toBe(beforeComputedAt);
+    await reloadUntilChanged(page, computedAt, beforeComputedAt);
     expect(await value.textContent()).not.toBe(beforeValue);
   });
 
@@ -212,21 +226,12 @@ test.describe('Cache Lab (Cache Components)', () => {
     const beforeComputedAt = await computedAt.textContent();
     const beforeValue = await value.textContent();
 
-    // Ensure it becomes stale.
-    await page.waitForTimeout(3000);
-
     await page
       .getByRole('button', { name: "revalidateTag('cache-lab:swr')" })
       .click();
     await page.waitForLoadState('networkidle');
 
-    // Allow some time for background refresh to potentially complete.
-    await page.waitForTimeout(4500);
-
-    await page.reload();
-    await expect(computedAt).toBeVisible();
-
-    expect(await computedAt.textContent()).not.toBe(beforeComputedAt);
+    await reloadUntilChanged(page, computedAt, beforeComputedAt);
     expect(await value.textContent()).not.toBe(beforeValue);
   });
 });
