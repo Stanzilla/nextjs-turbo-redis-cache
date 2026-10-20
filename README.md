@@ -499,6 +499,12 @@ The integration tests will start a Next.js server and test the caching handler. 
 
 Integration tests may have dependencies between test cases, so individual test failures should be evaluated in the context of the full test suite rather than in isolation.
 
+To run the Lua scripts of the handlers on a real Redis (`REDIS_URL`, default `redis://localhost:6379`). This test does not need a build or a Next.js app. Each test uses its own key prefix and deletes its keys after:
+
+```bash
+pnpm test:integration:redis-scripts
+```
+
 ### E2E tests (Playwright)
 
 To run Playwright tests (`test/playwright/**`) you can use:

@@ -3,6 +3,7 @@ import {
   PHASE_PRODUCTION_BUILD,
   shouldDeferRedisConnection,
 } from '../../../src/utils/redisConnection';
+import { PHASE_PRODUCTION_BUILD as NEXT_PHASE_PRODUCTION_BUILD } from 'next/constants';
 
 describe('shouldDeferRedisConnection', () => {
   const originalPhase = process.env.NEXT_PHASE;
@@ -33,7 +34,7 @@ describe('shouldDeferRedisConnection', () => {
     expect(shouldDeferRedisConnection()).toBe(false);
   });
 
-  it('uses the Next.js PHASE_PRODUCTION_BUILD string', () => {
-    expect(PHASE_PRODUCTION_BUILD).toBe('phase-production-build');
+  it('matches PHASE_PRODUCTION_BUILD from next/constants', () => {
+    expect(PHASE_PRODUCTION_BUILD).toBe(NEXT_PHASE_PRODUCTION_BUILD);
   });
 });

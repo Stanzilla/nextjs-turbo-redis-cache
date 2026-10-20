@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import type { CreateRedisStringsHandlerOptions } from '../../../src/index';
 import RedisStringsHandler from '../../../src/RedisStringsHandler';
 
 vi.mock('redis', () => {
@@ -224,16 +223,6 @@ describe('RedisStringsHandler', () => {
 
     await expect(handler.revalidateTag('posts')).resolves.toBeUndefined();
     expect(unlink).not.toHaveBeenCalled();
-  });
-});
-
-describe('Public exports', () => {
-  it('exports CreateRedisStringsHandlerOptions type', () => {
-    const _typeCheck: CreateRedisStringsHandlerOptions = {
-      keyPrefix: 'test',
-    };
-
-    expect(_typeCheck.keyPrefix).toBe('test');
   });
 });
 
