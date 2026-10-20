@@ -29,6 +29,7 @@ import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
 import { clusterSafeUnlink } from './utils/clusterSafeUnlink';
 import { compareAndUnlink } from './utils/compareAndUnlink';
+import { TagIndex } from './utils/tagIndex';
 
 // Re-exported for imports that used this module before.
 export { type Client, redisErrorHandler };
@@ -180,6 +181,14 @@ export type CreateRedisStringsHandlerOptions = {
    * @default '__sharedTags__'
    */
   sharedTagsKey?: string;
+  /** Keep an in-memory tag to keys index next to the shared tags map, so
+   *  revalidateTag looks up the keys of its tags instead of scanning every
+   *  entry. It costs memory and CPU for each set. Enable it only with about
+   *  1e5 tagged entries or more, or when a measured scan p95 is 5 ms or more
+   *  with 1 or more revalidateTag per second. Only RedisStringsHandler uses it.
+   * @default false
+   */
+  tagIndex?: boolean;
   /** Average interval in milliseconds between tag map full re-syncs
    * @default 3600000 (1 hour)
    */
@@ -303,7 +312,7 @@ function malformedCacheEntryReason(entry: CacheEntry): string | undefined {
 export default class RedisStringsHandler {
   // Not set when createClient() throws in the constructor.
   private client!: Client;
-  private sharedTagsMap: SyncedMap<string[]>;
+  private sharedTagsMap: SyncedMap<string[], TagIndex>;
   private revalidatedTagsMap: SyncedMap<number>;
   private invalidateDeduplicationCache: (keys: string[]) => Promise<void>;
   private getTimeoutMs: number;
@@ -347,6 +356,7 @@ export default class RedisStringsHandler {
       estimateExpireAge = (staleAge) =>
         process.env.VERCEL_ENV === 'production' ? staleAge * 2 : staleAge * 1.2,
       valueSerializer = jsonCacheValueSerializer,
+      tagIndex = false,
       revalidateTagDeleteConcurrency = 16,
     } = options;
     this.errorBudget = new ErrorBudget(killContainerOnErrorThreshold, () =>
@@ -387,7 +397,7 @@ export default class RedisStringsHandler {
 
       const subscriptions = createRedisSubscriptions(this.client);
 
-      this.sharedTagsMap = new SyncedMap<string[]>({
+      this.sharedTagsMap = new SyncedMap<string[], TagIndex>({
         client: this.client,
         subscriptions,
         keyPrefix,
@@ -396,6 +406,7 @@ export default class RedisStringsHandler {
         querySize: revalidateTagQuerySize,
         filterKeys,
         resyncIntervalMs: resyncDelay(avgResyncIntervalMs, 'before'),
+        createIndex: tagIndex ? () => new TagIndex() : undefined,
       });
 
       this.revalidatedTagsMap = new SyncedMap<number>({
@@ -822,6 +833,17 @@ export default class RedisStringsHandler {
     }
   }
 
+  /** The cache keys that depend on at least one of the tags. */
+  private keysWithAnyTag(tags: Set<string>): Set<string> {
+    const index = this.sharedTagsMap.index;
+    if (index) return index.keysWithAnyTag(tags);
+    const keys = new Set<string>();
+    for (const [key, sharedTags] of this.sharedTagsMap.entries()) {
+      if (sharedTags.some((tag) => tags.has(tag))) keys.add(key);
+    }
+    return keys;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public async revalidateTag(tagOrTags: string | string[], ...rest: any[]) {
     try {
@@ -840,9 +862,6 @@ export default class RedisStringsHandler {
       // Start every write before waiting, so that one deadline bounds them
       // all and a timeout does not skip the writes after it.
       const writes: Promise<unknown>[] = [];
-
-      // find all keys that are related to this tag
-      const keysToDelete: Set<string> = new Set();
 
       for (const tag of tags) {
         // INFO: implicit tags (revalidate of nested fetch in api route/page on revalidatePath call of the page/api route)
@@ -866,12 +885,7 @@ export default class RedisStringsHandler {
         }
       }
 
-      // Scan the whole sharedTagsMap for keys that are dependent on any of the revalidated tags
-      for (const [key, sharedTags] of this.sharedTagsMap.entries()) {
-        if (sharedTags.some((tag) => tags.has(tag))) {
-          keysToDelete.add(key);
-        }
-      }
+      const keysToDelete = this.keysWithAnyTag(tags);
 
       debug(
         'red',

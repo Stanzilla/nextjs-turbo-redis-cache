@@ -20,7 +20,16 @@ type CustomizedSync = {
   fieldsAreNotRedisKeys?: boolean;
 };
 
-type SyncedMapOptions = {
+/**
+ * Data derived from the map entries, for example a reverse lookup. The map
+ * calls it for every local change: set, delete and the entries of a reload.
+ */
+export interface MapIndex<V> {
+  set(key: string, value: V, previous: V | undefined): void;
+  delete(key: string, previous: V): void;
+}
+
+type SyncedMapOptions<V, I extends MapIndex<V>> = {
   client: Client;
   keyPrefix: string;
   redisKey: string; // Redis Hash key
@@ -34,7 +43,27 @@ type SyncedMapOptions = {
    * it, the map opens its own subscriber connection.
    */
   subscriptions?: RedisSubscriptions;
+  /** Creates an empty index. A reload fills a new one next to the new map. */
+  createIndex?: () => I;
 };
+
+type Change<V> = { value: V } | 'deleted';
+
+/** The only place that changes a map and its index. */
+function applyChange<V>(
+  map: Map<string, V>,
+  index: MapIndex<V> | undefined,
+  key: string,
+  change: Change<V>,
+) {
+  const previous = map.get(key);
+  if (change === 'deleted') {
+    if (map.delete(key)) index?.delete(key, previous as V);
+  } else {
+    map.set(key, change.value);
+    index?.set(key, change.value, previous);
+  }
+}
 
 export type SyncMessage<V> = {
   type: 'insert' | 'delete';
@@ -68,12 +97,14 @@ type ReadyWaiter = {
   fail: (error: Error) => void;
 };
 
-export class SyncedMap<V> {
+export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
   private client: Client;
   private subscriptions: RedisSubscriptions;
   private ownsSubscriptions: boolean;
   private removeSubscriptionListener: () => void;
   private map: Map<string, V>;
+  private createIndex?: () => I;
+  private currentIndex?: I;
   private keyPrefix: string;
   private syncChannel: string;
   private redisKey: string;
@@ -91,11 +122,11 @@ export class SyncedMap<V> {
   private reloadNeeded = false;
   private resyncTimer?: ReturnType<typeof setInterval>;
   /** Changes made while a reload scans the hash, newest per key. */
-  private changesDuringReload?: Map<string, { value: V } | 'deleted'>;
+  private changesDuringReload?: Map<string, Change<V>>;
   private closed = false;
   private retrier: Retrier;
 
-  constructor(options: SyncedMapOptions) {
+  constructor(options: SyncedMapOptions<V, I>) {
     this.client = options.client;
     this.keyPrefix = options.keyPrefix;
     this.redisKey = options.redisKey;
@@ -107,6 +138,8 @@ export class SyncedMap<V> {
     this.customizedSync = options.customizedSync;
 
     this.map = new Map<string, V>();
+    this.createIndex = options.createIndex;
+    this.currentIndex = this.createIndex?.();
     this.retrier = createRetrier(`SyncedMap ${this.redisKey}`);
 
     this.ownsSubscriptions = !options.subscriptions;
@@ -186,6 +219,9 @@ export class SyncedMap<V> {
     // where SCAN/HSCAN keep cursor as a string.
     let cursor = '0';
     const loaded = new Map<string, V>();
+    // Filled per HSCAN batch, so a large map does not block the event loop
+    // with one long rebuild at the swap.
+    const loadedIndex = this.createIndex?.();
     this.changesDuringReload = new Map();
 
     try {
@@ -205,7 +241,9 @@ export class SyncedMap<V> {
         for (let i = 0; i < tuples.length; i += 2) {
           const field = tuples[i];
           if (this.filterKeys(field)) {
-            loaded.set(field, JSON.parse(tuples[i + 1]));
+            applyChange(loaded, loadedIndex, field, {
+              value: JSON.parse(tuples[i + 1]),
+            });
           }
         }
         cursor = nextCursor;
@@ -214,10 +252,10 @@ export class SyncedMap<V> {
       // The scan can read a field before a change that this instance saw
       // during the scan, so those changes win over the scanned values.
       for (const [key, change] of this.changesDuringReload) {
-        if (change === 'deleted') loaded.delete(key);
-        else loaded.set(key, change.value);
+        applyChange(loaded, loadedIndex, key, change);
       }
       this.map = loaded;
+      this.currentIndex = loadedIndex;
       this.changesDuringReload = undefined;
 
       // sharedTagsMap keys are cache keys (Redis strings). Tag-manifest maps
@@ -520,13 +558,16 @@ export class SyncedMap<V> {
   }
 
   private setLocal(key: string, value: V) {
-    this.map.set(key, value);
-    this.changesDuringReload?.set(key, { value });
+    this.applyLocal(key, { value });
   }
 
   private deleteLocal(key: string) {
-    this.map.delete(key);
-    this.changesDuringReload?.set(key, 'deleted');
+    this.applyLocal(key, 'deleted');
+  }
+
+  private applyLocal(key: string, change: Change<V>) {
+    applyChange(this.map, this.currentIndex, key, change);
+    this.changesDuringReload?.set(key, change);
   }
 
   private async publishDeletion(keys: string[]): Promise<void> {
@@ -548,5 +589,10 @@ export class SyncedMap<V> {
 
   public entries(): IterableIterator<[string, V]> {
     return this.map.entries();
+  }
+
+  /** The index of the current entries, if the map has one. */
+  public get index(): I | undefined {
+    return this.currentIndex;
   }
 }

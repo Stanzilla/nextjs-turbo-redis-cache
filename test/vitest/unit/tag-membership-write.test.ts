@@ -62,8 +62,9 @@ const fetchData = (body: string) => ({
   revalidate: 60,
 });
 
-function createHandler() {
+function createHandler(options: { tagIndex?: boolean } = {}) {
   return new RedisStringsHandler({
+    ...options,
     redisUrl: 'redis://localhost:6379',
     keyPrefix: PREFIX,
     database: 0,
@@ -106,6 +107,26 @@ describe('RedisStringsHandler tag membership writes', () => {
     await handler.revalidateTag('posts');
     expect(hoisted.strings.has(PREFIX + 'k')).toBe(true);
   });
+
+  it.each([false, true])(
+    'revalidateTag deletes only the entries whose current tags match (tagIndex: %s)',
+    async (tagIndex) => {
+      const handler = createHandler({ tagIndex });
+      await handler.set('a', fetchData('a'), { tags: ['posts'] } as never);
+      await handler.set('b', fetchData('b1'), {
+        tags: ['posts', 'users'],
+      } as never);
+      await handler.set('b', fetchData('b2'), { tags: ['users'] } as never);
+      await handler.set('c', fetchData('c1'), { tags: ['posts'] } as never);
+      await handler.set('c', fetchData('c2'), { tags: [] } as never);
+
+      await handler.revalidateTag('posts');
+
+      expect(hoisted.strings.has(PREFIX + 'a')).toBe(false);
+      expect(hoisted.strings.has(PREFIX + 'b')).toBe(true);
+      expect(hoisted.strings.has(PREFIX + 'c')).toBe(true);
+    },
+  );
 
   it('does not change the tags of the caller context', async () => {
     const handler = createHandler();
