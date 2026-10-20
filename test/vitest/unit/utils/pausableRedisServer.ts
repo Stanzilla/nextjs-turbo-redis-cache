@@ -129,6 +129,9 @@ export async function startPausableRedisServer() {
     url: `redis://127.0.0.1:${port}`,
     store,
     received,
+    get connectionCount() {
+      return connections.size;
+    },
     pause(commands: string[] | 'ALL' = 'ALL') {
       pausedCommands = commands === 'ALL' ? 'ALL' : new Set(commands);
     },

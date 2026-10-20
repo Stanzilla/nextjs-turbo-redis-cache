@@ -454,6 +454,7 @@ Older package versions stored a number and compared it numerically. Immediate ha
 | **Implicit tag handling** | Stores timestamp in `revalidatedTagsMap` for every tag, lazy check in `get()` for every kind                     | Stores `{ stale, expired }` in `revalidatedTagsMap`; `get()` applies `areTagsExpired` / `areTagsStale`; `getExpiration()` returns max `expired` (soft tags) |
 | **Concurrent get/set**    | No wait                                                                                                          | Like `DefaultCacheHandler`, a `get()` of a key waits for a `set()` of that key on the same instance, at most `getTimeoutMs`. Then it reads Redis.           |
 | **Singleton pattern**     | External (user wraps in `module.exports`)                                                                        | Built-in `getRedisCacheComponentsHandler()` singleton                                                                                                       |
+| **Shutdown**              | `close()` (also on `CachedHandler`)                                                                              | `close()`; resets the singleton, so the next `getRedisCacheComponentsHandler()` opens a new one                                                             |
 | **Key prefix resolution** | `keyPrefix` option or `KEY_PREFIX` / `VERCEL_URL` env                                                            | `resolveKeyPrefix()` with BUILD_ID fallback                                                                                                                 |
 
 ### Shared Architecture
@@ -483,3 +484,5 @@ flowchart LR
 ```
 
 Both handlers rely on `SyncedMap` for cross-instance consistency of the tag maps. `RedisStringsHandler` finds affected keys via `sharedTagsMap`, batch-deletes them from Redis and cleans up the maps. `CacheComponentsHandler` has no `sharedTagsMap`: it writes the tag manifest only, and `get()` checks every entry, also one from the in-memory cache, against it. Versions before this change wrote a `__cacheComponents_sharedTags__` hash. Nothing reads it now, so you can delete it from Redis. Both also use `DeduplicatedRequestHandler` (enabled by default) to reduce Redis load by deduplicating concurrent `get()` calls for the same key and seeding the cache on `set()`.
+
+`close()` on both handlers clears the deduplication cache and its expiry timers, stops both `SyncedMap`s (unsubscribe and close the subscriber), and then closes the main client. A failed constructor calls the same `close()`, so a partly built handler does not keep a subscriber open. node-redis can finish a pending `connect()` after `disconnect()`, so `closeClient()` closes the client again when it becomes ready.

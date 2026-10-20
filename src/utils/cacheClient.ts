@@ -53,9 +53,16 @@ export function createCacheClient({
   const hasUserReconnectStrategy =
     socketOptions?.reconnectStrategy !== undefined;
 
+  // node-redis emits 'end' only when the owner closes the client.
+  let closedByOwner = false;
+  client.on('end', () => {
+    closedByOwner = true;
+  });
+
   let terminated = false;
   function terminateIfClosed(error: unknown) {
-    if (!hasUserReconnectStrategy || client.isOpen || terminated) return;
+    if (!hasUserReconnectStrategy || client.isOpen) return;
+    if (terminated || closedByOwner) return;
     terminated = true;
     console.error(
       `${label} is closed for good: the reconnectStrategy stopped reconnecting. Cache calls miss until the process restarts.`,
@@ -76,7 +83,7 @@ export function createCacheClient({
     setTimeout(() => {
       // An open socket that is not ready is already reconnecting. A second
       // connect() throws "Socket already opened".
-      if (client.isOpen) return;
+      if (client.isOpen || closedByOwner) return;
       client.connect().catch((err) => {
         console.error(
           `Failed to reconnect ${label} after connection loss:`,

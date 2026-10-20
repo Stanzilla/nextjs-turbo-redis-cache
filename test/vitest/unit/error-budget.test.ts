@@ -21,6 +21,7 @@ vi.mock('redis', () => ({
       on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
         listeners.set(event, [...(listeners.get(event) ?? []), cb]);
       }),
+      once: vi.fn(),
       emit: (event: string, ...args: unknown[]) => {
         (listeners.get(event) ?? []).forEach((cb) => cb(...args));
       },

@@ -356,6 +356,33 @@ module.exports = class CustomizedCacheHandler {
 };
 ```
 
+## Closing the handler
+
+Each handler has an async `close()` method. Use it in tests, scripts, or a
+graceful shutdown hook. It stops the tag sync, clears the in-memory
+deduplication cache and its timers, and closes the main and subscriber Redis
+connections. A second call returns the same promise. After `close()`, `get()`
+returns a miss, and `set()`, `revalidateTag()` and `updateTags()` reject at
+once. These errors do not count toward `killContainerOnErrorThreshold`.
+
+```ts
+import { redisCacheHandler } from '@trieb.work/nextjs-turbo-redis-cache';
+
+process.once('SIGTERM', () => {
+  void redisCacheHandler.close();
+});
+```
+
+- `RedisStringsHandler#close()` closes that instance.
+- `CachedHandler#close()` (the default export) closes the shared instance.
+  The next `CachedHandler` opens a new one.
+- `redisCacheHandler.close()` and the handler from
+  `getRedisCacheComponentsHandler()` close the Cache Components singleton.
+  The next call opens a new one. If no singleton exists, `close()` does
+  nothing.
+
+If the constructor fails, the handler closes the connections that it opened.
+
 ## Consistency of Redis and this caching implementation
 
 > For a detailed description of the shared hash maps (`sharedTagsMap`, `revalidatedTagsMap`), the `SyncedMap` Pub/Sub mechanism, and the `DeduplicatedRequestHandler`, see [ARCHITECTURE.md](./ARCHITECTURE.md).
