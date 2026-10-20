@@ -157,26 +157,29 @@ describe('RedisStringsHandler', () => {
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
     const stalledGet = await useStalledRedis6Client();
+    // Wide margins, so a slow CI runner cannot fail the timing check.
+    const sharedTimeoutMs = 400;
+    const joinDelayMs = 200;
 
     const handler = new RedisStringsHandler({
       redisUrl: 'redis://localhost:6379',
       keyPrefix: 'test:',
       database: 0,
-      getTimeoutMs,
+      getTimeoutMs: sharedTimeoutMs,
       redisGetDeduplication: true,
       inMemoryCachingTime: 1000,
     });
 
     const first = getMissingKey(handler);
     // The second caller joins the first caller's pending GET. The first
-    // signal aborts while the second caller's signal has 20ms left.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // signal aborts while the second caller's signal has 200ms left.
+    await new Promise((resolve) => setTimeout(resolve, joinDelayMs));
     const second = getMissingKey(handler);
 
     const results = await Promise.all([first, second]);
 
     expect(results.map(({ res }) => res)).toEqual([null, null]);
-    expect(results[1].elapsedMs).toBeLessThan(getTimeoutMs - 5);
+    expect(results[1].elapsedMs).toBeLessThan(sharedTimeoutMs - 100);
     expect(consoleErrorSpy).not.toHaveBeenCalled();
     expect(stalledGet).toHaveBeenCalledTimes(1);
   });
