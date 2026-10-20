@@ -304,6 +304,7 @@ export default class RedisStringsHandler {
   // Not set when createClient() throws in the constructor.
   private client!: Client;
   private subscriptions!: RedisSubscriptions;
+  private closing?: Promise<void>;
   private sharedTagsMap: SyncedMap<string[], TagIndex>;
   private revalidatedTagsMap: SyncedMap<number>;
   private invalidateDeduplicationCache: (keys: string[]) => Promise<void>;
@@ -370,7 +371,7 @@ export default class RedisStringsHandler {
           clientOptions,
           errorBudget: this.errorBudget,
           deferConnection: this.redisConnectionDeferred,
-          onTerminated: (error) => this.stopSync(error),
+          onTerminated: (error) => void this.stopSync(error),
         });
       } catch (error: unknown) {
         console.error('Failed to initialize Redis client');
@@ -431,7 +432,7 @@ export default class RedisStringsHandler {
         this.redisDeduplicationHandler.deduplicatedFunction;
     } catch (error) {
       console.error('RedisStringsHandler constructor error', error);
-      closeClient(this.client);
+      void this.close();
       constructorErrorBudget ??= new ErrorBudget(
         killContainerOnErrorThreshold,
         () => disconnectAndExit(undefined),
@@ -442,15 +443,28 @@ export default class RedisStringsHandler {
   }
 
   /**
-   * The client is closed for good, so the setup retries cannot succeed. A
-   * failed constructor can close the client before the maps exist.
+   * Stops the tag sync and the subscriber. The maps stay not ready, so cache
+   * calls miss. A failed constructor can call it before the maps exist.
    */
-  private stopSync(reason: unknown): void {
-    void Promise.all([
+  private async stopSync(reason: unknown): Promise<void> {
+    await Promise.all([
       this.sharedTagsMap?.stop(reason),
       this.revalidatedTagsMap?.stop(reason),
       this.subscriptions?.close(),
     ]);
+  }
+
+  /**
+   * Stops the tag sync, the subscriber and the timers, and closes the Redis
+   * client. Later cache calls miss. A second call returns the same promise.
+   */
+  public close(): Promise<void> {
+    this.closing ??= (async () => {
+      this.redisDeduplicationHandler?.close();
+      await this.stopSync(new Error('RedisStringsHandler is closed'));
+      await closeClient(this.client);
+    })();
+    return this.closing;
   }
 
   resetRequestCache(): void {}
