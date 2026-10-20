@@ -39,16 +39,19 @@ export class ErrorBudget {
   }
 }
 
-export function closeClient(client: Client | undefined): void {
+export async function closeClient(client: Client | undefined): Promise<void> {
+  // node-redis can finish a pending connect() after disconnect(), and the
+  // client is then open again.
+  client?.once('ready', () => void closeClient(client));
   try {
-    client?.disconnect().catch(() => {});
+    await client?.disconnect();
   } catch {
     // The client was not created or is already closed.
   }
 }
 
 export function disconnectAndExit(client: Client | undefined): void {
-  closeClient(client);
+  void closeClient(client);
   setTimeout(() => {
     process.exit(1);
   }, 500);

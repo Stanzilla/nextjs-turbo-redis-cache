@@ -8,6 +8,7 @@ export class DeduplicatedRequestHandler<
   K,
 > {
   private inMemoryDeduplicationCache = new Map<string, Promise<K>>();
+  private expiryTimers = new Set<ReturnType<typeof setTimeout>>();
   private cachingTimeMs: number;
   private fn: T;
 
@@ -24,6 +25,13 @@ export class DeduplicatedRequestHandler<
   /** Removes all entries on this instance only. */
   clearLocal(): void {
     this.inMemoryDeduplicationCache.clear();
+  }
+
+  /** Removes all entries and stops their expiry timers. */
+  close(): void {
+    for (const timer of this.expiryTimers) clearTimeout(timer);
+    this.expiryTimers.clear();
+    this.clearLocal();
   }
 
   /**
@@ -58,7 +66,8 @@ export class DeduplicatedRequestHandler<
   // Each instance runs its own timer, so the expiry is local and does not
   // publish a sync message.
   private expireLater(key: string, promise: Promise<K>): void {
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      this.expiryTimers.delete(timer);
       debugVerbose(
         'DeduplicatedRequestHandler expiring key from inMemoryDeduplicationCache after',
         key,
@@ -67,6 +76,7 @@ export class DeduplicatedRequestHandler<
       );
       this.forget(key, promise);
     }, this.cachingTimeMs);
+    this.expiryTimers.add(timer);
   }
 
   /**

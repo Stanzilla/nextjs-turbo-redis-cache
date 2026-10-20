@@ -59,6 +59,11 @@ export interface CacheComponentsHandler {
   refreshTags(): Promise<void>;
   getExpiration(tags: string[]): Promise<number>;
   updateTags(tags: string[], durations?: { expire?: number }): Promise<void>;
+  /**
+   * Closes the Redis connections and timers. The next
+   * getRedisCacheComponentsHandler() call creates a new handler.
+   */
+  close(): Promise<void>;
 }
 
 // The JSON form in Redis. The value is the stream content as base64.
@@ -155,6 +160,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
   // Not set when createClient() throws in the constructor.
   private client!: Client;
   private subscriptions!: RedisSubscriptions;
+  private closing?: Promise<void>;
   private errorBudget: ErrorBudget;
   private revalidatedTagsMap: SyncedMap<TagManifestEntry | number>;
   private invalidateDeduplicationCache: (keys: string[]) => Promise<void>;
@@ -210,7 +216,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         clientOptions,
         errorBudget: this.errorBudget,
         deferConnection: this.redisConnectionDeferred,
-        onTerminated: (error) => this.stopSync(error),
+        onTerminated: (error) => void this.stopSync(error),
       });
 
       const filterKeys = (key: string): boolean =>
@@ -253,7 +259,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         this.redisDeduplicationHandler.deduplicatedFunction;
     } catch (error) {
       console.error('RedisCacheComponentsHandler constructor error', error);
-      closeClient(this.client);
+      void this.close();
       constructorErrorBudget ??= new ErrorBudget(
         killContainerOnErrorThreshold,
         () => disconnectAndExit(undefined),
@@ -267,14 +273,28 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
   }
 
   /**
-   * The client is closed for good, so the setup retries cannot succeed. A
-   * failed constructor can close the client before the maps exist.
+   * Stops the tag sync and the subscriber. The maps stay not ready, so cache
+   * calls miss. A failed constructor can call it before the maps exist.
    */
-  private stopSync(reason: unknown): void {
-    void Promise.all([
+  private async stopSync(reason: unknown): Promise<void> {
+    await Promise.all([
       this.revalidatedTagsMap?.stop(reason),
       this.subscriptions?.close(),
     ]);
+  }
+
+  /**
+   * Stops the tag sync, the subscriber and the timers, and closes the Redis
+   * client. Later cache calls miss. A second call returns the same promise.
+   */
+  public close(): Promise<void> {
+    if (singletonHandler === this) singletonHandler = undefined;
+    this.closing ??= (async () => {
+      this.redisDeduplicationHandler?.close();
+      await this.stopSync(new Error('RedisCacheComponentsHandler is closed'));
+      await closeClient(this.client);
+    })();
+    return this.closing;
   }
 
   // Reads never reconnect: a closed client stays closed until its reconnect
@@ -639,18 +659,18 @@ export function getRedisCacheComponentsHandler(
 // consumer that configures the handler via `getRedisCacheComponentsHandler(options)`
 // before it is first used has that configuration honored, and a consumer that never
 // touches Cache Components never opens a Redis connection at all.
-let resolvedHandler: CacheComponentsHandler | undefined;
-
+//
+// The Proxy reads the singleton on each access, so after close() the next call
+// uses a new handler. close() before first use does not connect.
 export const redisCacheHandler: CacheComponentsHandler = new Proxy(
   {} as CacheComponentsHandler,
   {
     get(_target, prop) {
-      if (!resolvedHandler) {
-        resolvedHandler = getRedisCacheComponentsHandler();
-      }
-      const value = resolvedHandler[prop as keyof CacheComponentsHandler];
+      if (prop === 'close' && !singletonHandler) return async () => {};
+      const handler = getRedisCacheComponentsHandler();
+      const value = handler[prop as keyof CacheComponentsHandler];
       return typeof value === 'function'
-        ? (value as (...args: unknown[]) => unknown).bind(resolvedHandler)
+        ? (value as (...args: unknown[]) => unknown).bind(handler)
         : value;
     },
     has(_target, prop) {
