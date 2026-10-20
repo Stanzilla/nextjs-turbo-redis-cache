@@ -4,6 +4,7 @@ import {
   createRedisSubscriptions,
   syncChannelName,
 } from './utils/redisSubscriptions';
+import { resolveSharedOptions, resyncDelay } from './utils/options';
 import {
   DeduplicatedRequestHandler,
   syncDeduplicationCache,
@@ -27,7 +28,6 @@ import { createCacheClient } from './utils/cacheClient';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
 import { compareAndUnlink } from './utils/compareAndUnlink';
-import { parseEnvInt } from './utils/env';
 
 // Re-exported for imports that used this module before.
 export { type Client, redisErrorHandler };
@@ -309,36 +309,30 @@ export default class RedisStringsHandler {
   private valueSerializer: CacheValueSerializer;
   private redisConnectionDeferred: boolean;
 
-  constructor({
-    redisUrl = process.env.REDIS_URL
-      ? process.env.REDIS_URL
-      : process.env.REDISHOST
-        ? `redis://${process.env.REDISHOST}:${process.env.REDISPORT}`
-        : 'redis://localhost:6379',
-    database = process.env.VERCEL_ENV === 'production' ? 0 : 1,
-    keyPrefix = process.env.KEY_PREFIX ||
-      process.env.VERCEL_URL ||
-      'UNDEFINED_URL_',
-    sharedTagsKey = '__sharedTags__',
-    getTimeoutMs = parseEnvInt('REDIS_COMMAND_TIMEOUT_MS', 500, { min: 1 }),
-    writeTimeoutMs = parseEnvInt('REDIS_WRITE_TIMEOUT_MS', getTimeoutMs, {
-      min: 1,
-    }),
-    revalidateTagQuerySize = 250,
-    avgResyncIntervalMs = 60 * 60 * 1_000,
-    redisGetDeduplication = true,
-    inMemoryCachingTime = 10_000,
-    defaultStaleAge = 60 * 60 * 24 * 14,
-    estimateExpireAge = (staleAge) =>
-      process.env.VERCEL_ENV === 'production' ? staleAge * 2 : staleAge * 1.2,
-    killContainerOnErrorThreshold = parseEnvInt(
-      'KILL_CONTAINER_ON_ERROR_THRESHOLD',
-      0,
-    ),
-    socketOptions,
-    clientOptions,
-    valueSerializer = jsonCacheValueSerializer,
-  }: CreateRedisStringsHandlerOptions) {
+  constructor(options: CreateRedisStringsHandlerOptions) {
+    const {
+      redisUrl,
+      database,
+      getTimeoutMs,
+      writeTimeoutMs,
+      revalidateTagQuerySize,
+      avgResyncIntervalMs,
+      redisGetDeduplication,
+      inMemoryCachingTime,
+      killContainerOnErrorThreshold,
+      socketOptions,
+      clientOptions,
+    } = resolveSharedOptions(options);
+    const {
+      keyPrefix = process.env.KEY_PREFIX ||
+        process.env.VERCEL_URL ||
+        'UNDEFINED_URL_',
+      sharedTagsKey = '__sharedTags__',
+      defaultStaleAge = 60 * 60 * 24 * 14,
+      estimateExpireAge = (staleAge) =>
+        process.env.VERCEL_ENV === 'production' ? staleAge * 2 : staleAge * 1.2,
+      valueSerializer = jsonCacheValueSerializer,
+    } = options;
     this.errorBudget = new ErrorBudget(killContainerOnErrorThreshold, () =>
       disconnectAndExit(this.client),
     );
@@ -381,10 +375,7 @@ export default class RedisStringsHandler {
         database,
         querySize: revalidateTagQuerySize,
         filterKeys,
-        resyncIntervalMs:
-          avgResyncIntervalMs -
-          avgResyncIntervalMs / 10 +
-          Math.random() * (avgResyncIntervalMs / 10),
+        resyncIntervalMs: resyncDelay(avgResyncIntervalMs, 'before'),
       });
 
       this.revalidatedTagsMap = new SyncedMap<number>({
@@ -396,10 +387,7 @@ export default class RedisStringsHandler {
         querySize: revalidateTagQuerySize,
         filterKeys,
         customizedSync: { fieldsAreNotRedisKeys: true },
-        resyncIntervalMs:
-          avgResyncIntervalMs +
-          avgResyncIntervalMs / 10 +
-          Math.random() * (avgResyncIntervalMs / 10),
+        resyncIntervalMs: resyncDelay(avgResyncIntervalMs, 'after'),
       });
 
       const redisGet = createAbortableGet(this.client);
