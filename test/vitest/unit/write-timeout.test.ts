@@ -79,8 +79,17 @@ describe(`Redis writes with redis ${redisPackage.version} when Redis stops answe
       ...options,
       keyPrefix: 'components:',
     });
-    await strings.set('/warm-up', pagesValue, { ...pagesCtx });
-    await components.set('warm-up', componentsEntry([]));
+    // The readiness wait has the same 50 ms budget, which a loaded CI host
+    // can miss. Retry until the clients are ready.
+    const warmUp = { timeout: 5_000, interval: 50 };
+    await vi.waitFor(
+      () => strings.set('/warm-up', pagesValue, { ...pagesCtx }),
+      warmUp,
+    );
+    await vi.waitFor(
+      () => components.set('warm-up', componentsEntry([])),
+      warmUp,
+    );
   });
 
   afterEach(() => {
