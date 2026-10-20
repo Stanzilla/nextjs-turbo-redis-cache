@@ -83,23 +83,65 @@ export type SyncMessage<V> = {
 };
 
 /**
- * KEYS[1] is the hash and ARGV[1] is the sync channel. For i >= 2, KEYS[i] is
- * the cache key of field ARGV[i]. The delete message is published in the same
- * step, so peers cannot miss a removed field. A field that is already gone is
- * not published again, so many instances can run the script for one key.
+ * KEYS[1] is the hash, ARGV[1] is the sync channel and the next arguments are
+ * fields. The script removes the fields and returns pairs of a field and its
+ * value. The delete message is published in the same step, so peers cannot
+ * miss a removed field. A field that is already gone is not returned, so when
+ * many instances run the script for one field, only one gets it.
+ *
+ * All scripts use only the hash key, because a Redis cluster rejects a script
+ * with keys in different hash slots.
  */
-const DELETE_FIELDS_WITHOUT_KEY = `
+const TAKE_FIELDS = `
 local removed = {}
+local taken = {}
 for i = 2, #ARGV do
-  if redis.call('EXISTS', KEYS[i]) == 0 and redis.call('HDEL', KEYS[1], ARGV[i]) == 1 then
+  local value = redis.call('HGET', KEYS[1], ARGV[i])
+  if value then
+    redis.call('HDEL', KEYS[1], ARGV[i])
     removed[#removed + 1] = ARGV[i]
+    taken[#taken + 1] = ARGV[i]
+    taken[#taken + 1] = value
   end
 end
 if #removed > 0 then
   redis.call('PUBLISH', ARGV[1], cjson.encode({ type = 'delete', keys = removed }))
 end
-return removed
+return taken
 `;
+/**
+ * KEYS[1] is the hash, ARGV[1] is the sync channel, and the next arguments
+ * are pairs of a field and the value that TAKE_FIELDS returned. A field that
+ * a writer stored in the meantime is kept. For each restored field, the
+ * script publishes the same insert message as set(). The value is already
+ * JSON, so it goes into the message as it is.
+ */
+const RESTORE_FIELDS_IF_ABSENT = `
+for i = 2, #ARGV, 2 do
+  if redis.call('HSETNX', KEYS[1], ARGV[i], ARGV[i + 1]) == 1 then
+    redis.call('PUBLISH', ARGV[1], '{"type":"insert","key":' .. cjson.encode(ARGV[i]) .. ',"value":' .. ARGV[i + 1] .. '}')
+  end
+end
+`;
+
+type TakenField = { field: string; raw: string };
+
+function parseTakenFields(reply: unknown): TakenField[] {
+  if (
+    !Array.isArray(reply) ||
+    reply.length % 2 !== 0 ||
+    !reply.every((item) => typeof item === 'string')
+  ) {
+    throw new Error(
+      `Unexpected reply of the take script: ${JSON.stringify(reply)}`,
+    );
+  }
+  const taken: TakenField[] = [];
+  for (let i = 0; i < reply.length; i += 2) {
+    taken.push({ field: reply[i], raw: reply[i + 1] });
+  }
+  return taken;
+}
 /**
  * KEYS[1] is the hash, ARGV[1] is the sync channel, and the next arguments
  * are pairs of a field and the value that the reload read. A field that a
@@ -336,10 +378,10 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
   }
 
   /**
-   * Removes fields whose cache key is gone from Redis. The script checks and
-   * deletes in one step, so a key that a writer stores during the cleanup
-   * keeps its field. Only keys of the local snapshot are checked, so the cost
-   * follows the map size, not the size of the keyspace.
+   * Removes fields whose cache key is gone from Redis. Only keys of the local
+   * snapshot are checked, so the cost follows the map size, not the size of
+   * the keyspace. The first EXISTS check only finds the candidates, so most
+   * fields are not removed and restored.
    *
    * The cleanup is best-effort: the map is already loaded, and a failure only
    * keeps some orphan fields until the next resync. It must not keep the map
@@ -349,10 +391,16 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
     const fields = [...this.map.keys()].filter((key) => this.filterKeys(key));
     try {
       for (let i = 0; i < fields.length; i += this.querySize) {
-        await this.deleteFieldsWithoutKey(
+        const missing = await this.fieldsWithMissingKey(
           fields.slice(i, i + this.querySize),
           'SyncedMap.cleanupKeysNotInRedis()',
         );
+        if (missing.length > 0) {
+          await this.deleteFieldsWithoutKey(
+            missing,
+            'SyncedMap.cleanupKeysNotInRedis()',
+          );
+        }
       }
     } catch (error) {
       console.error('Error during cleanup of keys not in Redis:', error);
@@ -360,19 +408,60 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
   }
 
   /**
-   * Deletes the fields whose cache key is not in Redis. The local map is not
-   * changed here: the script publishes the delete, and the subscriber applies
-   * it in channel order, so a later insert from a peer is not lost.
+   * Returns the fields whose cache key is not in Redis. It sends one EXISTS
+   * for each key, because a Redis cluster rejects a command with keys in
+   * different hash slots. The client sends the commands together.
+   */
+  private async fieldsWithMissingKey(fields: string[], context: string) {
+    const exists = await redisErrorHandler(
+      `${context}, operation: EXISTS ${fields.length} keys`,
+      Promise.all(
+        fields.map((field) => this.client.exists(this.keyPrefix + field)),
+      ),
+    );
+    return fields.filter((_, i) => exists[i] === 0);
+  }
+
+  /**
+   * Deletes the fields whose cache key is not in Redis, in three steps:
+   * 1. Remove the fields from the hash and get their values.
+   * 2. Check the cache key of each removed field.
+   * 3. Put back the fields whose key exists, with the same value. A field
+   *    that a writer stored in the meantime is kept.
+   * The local map is not changed here: the scripts publish the delete and
+   * the insert, and the subscriber applies them in channel order, so a later
+   * insert from a peer is not lost.
    */
   private async deleteFieldsWithoutKey(fields: string[], context: string) {
+    const hash = this.keyPrefix + this.redisKey;
+    const taken = parseTakenFields(
+      await redisErrorHandler(
+        `${context}, operation: EVAL take ${hash}`,
+        this.client.eval(TAKE_FIELDS, {
+          keys: [hash],
+          arguments: [this.syncChannel, ...fields],
+        }),
+      ),
+    );
+    if (taken.length === 0) return;
+
+    const missing = new Set(
+      await this.fieldsWithMissingKey(
+        taken.map(({ field }) => field),
+        context,
+      ),
+    );
+    const back = taken.filter(({ field }) => !missing.has(field));
+    if (back.length === 0) return;
+
     await redisErrorHandler(
-      `${context}, operation: EVAL ${this.keyPrefix}${this.redisKey}`,
-      this.client.eval(DELETE_FIELDS_WITHOUT_KEY, {
-        keys: [
-          this.keyPrefix + this.redisKey,
-          ...fields.map((field) => this.keyPrefix + field),
+      `${context}, operation: EVAL restore ${hash}`,
+      this.client.eval(RESTORE_FIELDS_IF_ABSENT, {
+        keys: [hash],
+        arguments: [
+          this.syncChannel,
+          ...back.flatMap(({ field, raw }) => [field, raw]),
         ],
-        arguments: [this.syncChannel, ...fields],
       }),
     );
   }
@@ -484,8 +573,9 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
             key,
           );
           // The event can arrive after a writer stored the key again. A
-          // plain HDEL then removes the new field, so check and delete in
-          // one step.
+          // plain HDEL then removes the new field, so check the key again
+          // after the field is removed, and put back the field if the key
+          // exists.
           this.deleteFieldsWithoutKey(
             [keyInMap],
             'SyncedMap.keyEventHandler()',
