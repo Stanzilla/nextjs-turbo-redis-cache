@@ -304,6 +304,32 @@ describe('in-memory read cache across instances', () => {
     expect(await readHtml(reader)).toBeNull();
   });
 
+  // During a rolling deploy that turns the in-memory cache on, or with mixed
+  // settings, a writer without the cache must still drop the copies of peers.
+  it('drops the cached copy on another instance after set() by an instance without the in-memory cache', async () => {
+    const writer = createInstance(0);
+    const reader = createInstance(10_000);
+
+    await writer.set(KEY, page('v1'), setCtx);
+    expect(await readHtml(reader)).toBe('v1');
+
+    await writer.set(KEY, page('v2'), setCtx);
+
+    expect(await readHtml(reader)).toBe('v2');
+  });
+
+  it('drops the cached copy on another instance after revalidateTag() by an instance without the in-memory cache', async () => {
+    const writer = createInstance(0);
+    const reader = createInstance(10_000);
+
+    await writer.set(KEY, page('v1'), setCtx);
+    expect(await readHtml(reader)).toBe('v1');
+
+    await writer.revalidateTag(`_N_T_${KEY}`);
+
+    expect(await readHtml(reader)).toBeNull();
+  });
+
   it('does not serve a value that changed while its subscriber was lost', async () => {
     const writer = createInstance(10_000);
     const reader = createInstance(10_000);
