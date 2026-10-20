@@ -21,6 +21,9 @@ class HashMockClient {
   on() {
     return this;
   }
+  removeAllListeners() {
+    return this;
+  }
 
   async connect() {
     this.isOpen = true;

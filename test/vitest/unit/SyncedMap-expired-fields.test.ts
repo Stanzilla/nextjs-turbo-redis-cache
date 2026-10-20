@@ -12,6 +12,9 @@ class MockClient {
   on() {
     return this;
   }
+  removeAllListeners() {
+    return this;
+  }
   async connect() {}
   async configGet() {
     return { 'notify-keyspace-events': 'Exe' };
