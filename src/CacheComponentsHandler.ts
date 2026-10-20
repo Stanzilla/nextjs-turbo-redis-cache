@@ -1,5 +1,6 @@
 import type { CreateRedisStringsHandlerOptions } from './RedisStringsHandler';
 import { SyncedMap } from './SyncedMap';
+import { createRedisSubscriptions } from './utils/redisSubscriptions';
 import { DeduplicatedRequestHandler } from './DeduplicatedRequestHandler';
 import { resolveKeyPrefix } from './utils/prefix';
 import {
@@ -181,8 +182,11 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       const filterKeys = (key: string): boolean =>
         key !== REVALIDATED_TAGS_KEY && key !== LEGACY_SHARED_TAGS_KEY;
 
+      const subscriptions = createRedisSubscriptions(this.client);
+
       this.revalidatedTagsMap = new SyncedMap<TagManifestEntry | number>({
         client: this.client,
+        subscriptions,
         keyPrefix: this.keyPrefix,
         redisKey: REVALIDATED_TAGS_KEY,
         database,
@@ -197,6 +201,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
 
       this.inMemoryDeduplicationCache = new SyncedMap({
         client: this.client,
+        subscriptions,
         keyPrefix: this.keyPrefix,
         redisKey: '__cacheComponents_inMemoryDeduplicationCache__',
         database,

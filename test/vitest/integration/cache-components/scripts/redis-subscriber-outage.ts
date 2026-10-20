@@ -107,7 +107,7 @@ async function main() {
   await waitUntil(async () => (handlerB as any).client.isReady, 20_000);
   await waitUntil(async () => (handlerC as any).client.isReady, 20_000);
 
-  // Record initial duplicate count (3 SyncedMaps × 1 duplicate each = 3)
+  // Record initial duplicate count (1 shared subscriber per handler)
   const initialDuplicateCount = duplicateCount;
 
   // 5. Test: PubSub sync works before outage
@@ -140,8 +140,8 @@ async function main() {
   );
 
   // 6. Test: Error listeners present before outage
-  const subB = (handlerB as any).sharedTagsMap.subscriberClient;
-  const subC = (handlerC as any).revalidatedTagsMap.subscriberClient;
+  const subB = (handlerB as any).sharedTagsMap.subscriptions.client;
+  const subC = (handlerC as any).revalidatedTagsMap.subscriptions.client;
   const initListenerB = subB?.listenerCount?.('error') ?? -1;
   const initListenerC = subC?.listenerCount?.('error') ?? -1;
 
@@ -296,10 +296,10 @@ async function main() {
   // 15. Test: Error listener on subscriber after outage
   // Informational: the listener may still be present on the old dead client
   // (if quit() threw before duplicate()), or may be missing (if duplicate()
-  // ran but setupPubSub() threw). Either way, the subscriber is non-functional.
+  // ran but the subscribe step threw). Either way, the subscriber is non-functional.
   // The definitive test is pubsub-after-outage-strings below.
-  const subBAfter = (handlerB as any).sharedTagsMap.subscriberClient;
-  const subCAfter = (handlerC as any).revalidatedTagsMap.subscriberClient;
+  const subBAfter = (handlerB as any).sharedTagsMap.subscriptions.client;
+  const subCAfter = (handlerC as any).revalidatedTagsMap.subscriptions.client;
   const afterListenerB = subBAfter?.listenerCount?.('error') ?? -1;
   const afterListenerC = subCAfter?.listenerCount?.('error') ?? -1;
   const sameClientB = subBAfter === subB;
