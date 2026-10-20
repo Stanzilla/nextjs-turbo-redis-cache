@@ -891,13 +891,16 @@ export default class RedisStringsHandler {
         // prepare deletion of all keys in redis that are related to this tag
         const redisKeys = Array.from(keysToDelete);
         const fullRedisKeys = redisKeys.map((key) => this.keyPrefix + key);
+        // Send one UNLINK for each key. A Redis cluster rejects a command
+        // with keys in different hash slots. The client sends these
+        // commands together in one round trip.
         writes.push(
           redisErrorHandler(
             'RedisStringsHandler.revalidateTag(), operation: unlink ' +
               this.keyPrefix +
               ' ' +
               fullRedisKeys,
-            this.client.unlink(fullRedisKeys),
+            Promise.all(fullRedisKeys.map((key) => this.client.unlink(key))),
           ),
         );
 
