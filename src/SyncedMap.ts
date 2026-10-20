@@ -75,13 +75,13 @@ export type SyncMessage<V> = {
 /**
  * KEYS[1] is the hash and ARGV[1] is the sync channel. For i >= 2, KEYS[i] is
  * the cache key of field ARGV[i]. The delete message is published in the same
- * step, so peers cannot miss a removed field.
+ * step, so peers cannot miss a removed field. A field that is already gone is
+ * not published again, so many instances can run the script for one key.
  */
 const DELETE_FIELDS_WITHOUT_KEY = `
 local removed = {}
 for i = 2, #ARGV do
-  if redis.call('EXISTS', KEYS[i]) == 0 then
-    redis.call('HDEL', KEYS[1], ARGV[i])
+  if redis.call('EXISTS', KEYS[i]) == 0 and redis.call('HDEL', KEYS[1], ARGV[i]) == 1 then
     removed[#removed + 1] = ARGV[i]
   end
 end
@@ -284,25 +284,32 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
     const fields = [...this.map.keys()].filter((key) => this.filterKeys(key));
     try {
       for (let i = 0; i < fields.length; i += this.querySize) {
-        const batch = fields.slice(i, i + this.querySize);
-        // The script publishes the delete. The subscriber applies it in
-        // channel order, so a later insert from a peer is not lost.
-        await redisErrorHandler(
-          'SyncedMap.cleanupKeysNotInRedis(), operation: EVAL ' +
-            this.keyPrefix +
-            this.redisKey,
-          this.client.eval(DELETE_FIELDS_WITHOUT_KEY, {
-            keys: [
-              this.keyPrefix + this.redisKey,
-              ...batch.map((field) => this.keyPrefix + field),
-            ],
-            arguments: [this.syncChannel, ...batch],
-          }),
+        await this.deleteFieldsWithoutKey(
+          fields.slice(i, i + this.querySize),
+          'SyncedMap.cleanupKeysNotInRedis()',
         );
       }
     } catch (error) {
       console.error('Error during cleanup of keys not in Redis:', error);
     }
+  }
+
+  /**
+   * Deletes the fields whose cache key is not in Redis. The local map is not
+   * changed here: the script publishes the delete, and the subscriber applies
+   * it in channel order, so a later insert from a peer is not lost.
+   */
+  private async deleteFieldsWithoutKey(fields: string[], context: string) {
+    await redisErrorHandler(
+      `${context}, operation: EVAL ${this.keyPrefix}${this.redisKey}`,
+      this.client.eval(DELETE_FIELDS_WITHOUT_KEY, {
+        keys: [
+          this.keyPrefix + this.redisKey,
+          ...fields.map((field) => this.keyPrefix + field),
+        ],
+        arguments: [this.syncChannel, ...fields],
+      }),
+    );
   }
 
   private setupPeriodicResync() {
@@ -369,7 +376,13 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
             message,
             key,
           );
-          this.delete(keyInMap, true).catch((error) => {
+          // The event can arrive after a writer stored the key again. A
+          // plain HDEL then removes the new field, so check and delete in
+          // one step.
+          this.deleteFieldsWithoutKey(
+            [keyInMap],
+            'SyncedMap.keyEventHandler()',
+          ).catch((error) => {
             console.error('SyncedMap.keyEventHandler() delete failed', error);
           });
         }
