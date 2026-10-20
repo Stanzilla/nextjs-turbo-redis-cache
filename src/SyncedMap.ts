@@ -155,6 +155,7 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
   /** Changes made while a reload scans the hash, newest per key. */
   private changesDuringReload?: Map<string, Change<V>>;
   private closed = false;
+  private stopped = false;
   private retrier: Retrier;
 
   constructor(options: SyncedMapOptions<V, I>) {
@@ -229,6 +230,7 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
   }
 
   private markReady() {
+    if (this.stopped) return;
     this.lastSetupError = undefined;
     this.isSetUp = true;
     for (const waiter of this.readyWaiters) waiter.ready();
@@ -412,6 +414,17 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
   }
 
   /**
+   * Stops the map for good, for example after a user reconnectStrategy closed
+   * the client. The map stays not ready, so cache calls miss at once.
+   */
+  public async stop(reason: unknown): Promise<void> {
+    this.stopped = true;
+    this.isSetUp = false;
+    this.recordSetupError(reason);
+    await this.close();
+  }
+
+  /**
    * Stops the periodic resync, the subscriber and the pending setup retries.
    * The shared main client stays open.
    */
@@ -509,6 +522,11 @@ export class SyncedMap<V, I extends MapIndex<V> = MapIndex<V>> {
   }
 
   private notReadyError() {
+    if (this.stopped) {
+      return new Error(
+        `SyncedMap ${this.redisKey} is stopped: ${String(this.lastSetupError)}`,
+      );
+    }
     return new Error(
       `SyncedMap ${this.redisKey} is not ready, setup is retrying after: ${String(this.lastSetupError)}`,
     );
