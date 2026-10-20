@@ -405,6 +405,8 @@ export default class RedisStringsHandler {
         filterKeys,
         resyncIntervalMs: resyncDelay(avgResyncIntervalMs, 'before'),
         createIndex: tagIndex ? () => new TagIndex() : undefined,
+        isValidValue: (value): value is string[] =>
+          Array.isArray(value) && value.every((tag) => typeof tag === 'string'),
       });
 
       this.revalidatedTagsMap = new SyncedMap<number>({
@@ -417,6 +419,8 @@ export default class RedisStringsHandler {
         filterKeys,
         customizedSync: { fieldsAreNotRedisKeys: true },
         resyncIntervalMs: resyncDelay(avgResyncIntervalMs, 'after'),
+        isValidValue: (value): value is number =>
+          typeof value === 'number' && Number.isFinite(value),
       });
 
       const redisGet = createAbortableGet(this.client);

@@ -30,6 +30,7 @@ import {
   applyTagUpdate,
   areTagsExpired,
   areTagsStale,
+  isStoredTagManifest,
   maxExpiredTimestamp,
   normalizeTagManifest,
   persistableTagManifest,
@@ -212,6 +213,7 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
         filterKeys,
         customizedSync: { fieldsAreNotRedisKeys: true },
         resyncIntervalMs: resyncDelay(avgResyncIntervalMs, 'after'),
+        isValidValue: isStoredTagManifest,
       });
 
       const redisGet = createAbortableGet(this.client);
