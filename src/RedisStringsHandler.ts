@@ -167,8 +167,8 @@ export type CreateRedisStringsHandlerOptions = {
   /** Timeout in milliseconds for the Redis writes that a request waits for (set, revalidateTag).
    *  If Redis does not confirm them within this time, `set` logs a warning and returns, so the
    *  request is not blocked further. The write can still be applied later, or be lost.
-   *  `revalidateTag` logs an error and throws a `RedisTimeoutError` instead, because a lost
-   *  invalidation leaves stale entries on every instance.
+   *  `revalidateTag` (and `updateTags` for Cache Components) logs an error and throws a
+   *  `RedisTimeoutError` instead, because a lost invalidation leaves stale entries on every instance.
    * @default process.env.REDIS_WRITE_TIMEOUT_MS, else getTimeoutMs
    */
   writeTimeoutMs?: number;

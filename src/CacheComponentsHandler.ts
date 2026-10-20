@@ -12,6 +12,7 @@ import {
 import { resolveKeyPrefix } from './utils/prefix';
 import {
   type Client,
+  RedisNotReadyError,
   redisErrorHandler,
   shouldDeferRedisConnection,
   waitForReadiness,
@@ -499,8 +500,15 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
   ): Promise<void> {
     try {
       await this.assertClientIsReady(this.writeTimeoutMs);
-      if (this.isClientUnavailable()) {
+      if (this.redisConnectionDeferred) {
         return;
+      }
+      // A lost invalidation leaves stale entries on every instance, so the
+      // caller must see it fail, as in RedisStringsHandler.revalidateTag().
+      if (!this.client.isReady) {
+        throw new RedisNotReadyError(
+          'RedisCacheComponentsHandler.updateTags(): Redis client is not ready yet or connection is lost.',
+        );
       }
 
       const now = Date.now();
@@ -521,13 +529,13 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
       );
     } catch (error) {
       if (error instanceof RedisTimeoutError) {
-        console.warn(
+        console.error(
           'RedisCacheComponentsHandler.updateTags() Redis did not confirm the writes within',
           this.writeTimeoutMs,
-          'ms. Returning without them, other instances may serve stale entries for tags:',
+          'ms. Other instances may serve stale entries for tags:',
           tags,
         );
-        return;
+        throw error;
       }
       console.error(
         'RedisCacheComponentsHandler.updateTags() Error occurred while updating tags. The original error was:',
