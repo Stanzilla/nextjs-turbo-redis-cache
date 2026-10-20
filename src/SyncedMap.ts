@@ -2,6 +2,12 @@
 import { type Client, redisErrorHandler } from './utils/redisConnection';
 import { debugVerbose, debug } from './utils/debug';
 import { shouldDeferRedisConnection } from './utils/redisConnection';
+import {
+  createRedisSubscriptions,
+  type MessageHandler,
+  type RedisSubscriptions,
+} from './utils/redisSubscriptions';
+import { createRetrier, type Retrier } from './utils/retry';
 
 type CustomizedSync = {
   withoutRedisHashmap?: boolean;
@@ -24,6 +30,11 @@ type SyncedMapOptions = {
   filterKeys: (key: string) => boolean;
   resyncIntervalMs?: number;
   customizedSync?: CustomizedSync;
+  /**
+   * The subscriber connection of the handler, shared by its maps. Without
+   * it, the map opens its own subscriber connection.
+   */
+  subscriptions?: RedisSubscriptions;
 };
 
 export type SyncMessage<V> = {
@@ -60,12 +71,11 @@ type ReadyWaiter = {
   fail: (error: Error) => void;
 };
 
-const retryDelayMs = (attempt: number) =>
-  Math.min(500 * Math.pow(2, Math.min(attempt, 5)), 10_000);
-
 export class SyncedMap<V> {
   private client: Client;
-  private subscriberClient?: Client;
+  private subscriptions: RedisSubscriptions;
+  private ownsSubscriptions: boolean;
+  private removeSubscriptionListener: () => void;
   private map: Map<string, V>;
   private keyPrefix: string;
   private syncChannel: string;
@@ -79,7 +89,6 @@ export class SyncedMap<V> {
   private isSetUp = false;
   private lastSetupError: unknown;
   private readyWaiters = new Set<ReadyWaiter>();
-  private subscriberSetup?: Promise<void>;
   private sync?: Promise<void>;
   private resubscribeNeeded = true;
   private reloadNeeded = false;
@@ -87,8 +96,7 @@ export class SyncedMap<V> {
   /** Changes made while a reload scans the hash, newest per key. */
   private changesDuringReload?: Map<string, { value: V } | 'deleted'>;
   private closed = false;
-  // Retry delays that close() must end.
-  private retryWaits = new Set<() => void>();
+  private retrier: Retrier;
 
   constructor(options: SyncedMapOptions) {
     this.client = options.client;
@@ -102,6 +110,15 @@ export class SyncedMap<V> {
     this.customizedSync = options.customizedSync;
 
     this.map = new Map<string, V>();
+    this.retrier = createRetrier(`SyncedMap ${this.redisKey}`);
+
+    this.ownsSubscriptions = !options.subscriptions;
+    this.subscriptions =
+      options.subscriptions ?? createRedisSubscriptions(options.client);
+    this.removeSubscriptionListener = this.subscriptions.add({
+      channels: this.channels(),
+      onError: (error, lost) => this.onSubscriberError(error, lost),
+    });
 
     void this.setup();
   }
@@ -128,13 +145,15 @@ export class SyncedMap<V> {
       while (this.resubscribeNeeded || this.reloadNeeded) {
         if (this.resubscribeNeeded) {
           this.resubscribeNeeded = false;
-          await this.reconnectSubscriber();
+          await this.subscriptions.ready();
           this.reloadNeeded = true;
         }
         this.reloadNeeded = false;
         if (!this.customizedSync?.withoutRedisHashmap) {
-          await this.retryUntilSuccess('Initial sync', () =>
-            this.initialSync(),
+          await this.retrier.run(
+            'Initial sync',
+            () => this.initialSync(),
+            (error) => this.recordSetupError(error),
           );
         }
       }
@@ -159,47 +178,12 @@ export class SyncedMap<V> {
    * Until the subscriber is back and the map is reloaded, the map can miss
    * entries, so revalidateTag() could skip keys. Report not ready meanwhile.
    */
-  private onSubscriberError(error: unknown) {
-    console.error('Subscriber client error:', error);
+  private onSubscriberError(error: unknown, lost: boolean) {
     this.isSetUp = false;
     this.recordSetupError(error);
     if (this.closed) return;
-    // A subscriber setup in flight already creates a new client.
-    if (!this.subscriberSetup) this.resubscribeNeeded = true;
+    if (lost) this.resubscribeNeeded = true;
     void this.runSync();
-  }
-
-  /**
-   * A pod can start while Redis is down, or lose the socket during the first
-   * HSCAN. One failed attempt must not leave the map unready for good.
-   */
-  private async retryUntilSuccess(
-    label: string,
-    operation: () => Promise<void>,
-  ): Promise<void> {
-    for (let attempt = 0; ; attempt++) {
-      if (this.closed) throw new Error(`SyncedMap ${this.redisKey} is closed`);
-      try {
-        return await operation();
-      } catch (error) {
-        if (this.closed) throw error;
-        this.recordSetupError(error);
-        const delay = retryDelayMs(attempt);
-        console.error(
-          `${label} attempt ${attempt + 1} failed, retrying in ${delay}ms`,
-          error,
-        );
-        await new Promise<void>((resolve) => {
-          const wake = () => {
-            clearTimeout(timer);
-            this.retryWaits.delete(wake);
-            resolve();
-          };
-          const timer = setTimeout(wake, delay);
-          this.retryWaits.add(wake);
-        });
-      }
-    }
   }
 
   private async initialSync() {
@@ -311,23 +295,18 @@ export class SyncedMap<V> {
     this.closed = true;
     clearInterval(this.resyncTimer);
     this.resyncTimer = undefined;
-    for (const wake of this.retryWaits) wake();
-    const subscriber = this.subscriberClient;
-    this.subscriberClient = undefined;
-    await this.disconnectSubscriber(subscriber);
+    this.retrier.stop();
+    this.removeSubscriptionListener();
+    if (this.ownsSubscriptions) await this.subscriptions.close();
   }
 
-  private async disconnectSubscriber(subscriber: Client | undefined) {
-    try {
-      subscriber?.removeAllListeners('error');
-      await subscriber?.disconnect();
-    } catch {
-      // expected during outage
-    }
-  }
-
-  private async setupPubSub(subscriber: Client) {
-    const syncHandler = async (message: string) => {
+  /**
+   * The sync channel carries insert and delete messages. A custom channel can
+   * delete many entries in one message and send the value with an insert,
+   * while unlink/del keyevents would send one message per key.
+   */
+  private channels(): [string, MessageHandler][] {
+    const syncHandler: MessageHandler = (message) => {
       const syncMessage: SyncMessage<V> = JSON.parse(message);
       if (syncMessage.type === 'insert') {
         if (syncMessage.key !== undefined && syncMessage.value !== undefined) {
@@ -342,7 +321,7 @@ export class SyncedMap<V> {
       }
     };
 
-    const keyEventHandler = async (key: string, message: string) => {
+    const keyEventHandler: MessageHandler = (key, message) => {
       debug(
         'yellow',
         'SyncedMap.keyEventHandler() called with message',
@@ -350,7 +329,6 @@ export class SyncedMap<V> {
         message,
         key,
       );
-      // const key = message;
       if (key.startsWith(this.keyPrefix)) {
         const keyInMap = key.substring(this.keyPrefix.length);
         if (this.filterKeys(keyInMap)) {
@@ -360,7 +338,9 @@ export class SyncedMap<V> {
             message,
             key,
           );
-          await this.delete(keyInMap, true);
+          this.delete(keyInMap, true).catch((error) => {
+            console.error('SyncedMap.keyEventHandler() delete failed', error);
+          });
         }
       } else {
         debugVerbose(
@@ -372,103 +352,15 @@ export class SyncedMap<V> {
       }
     };
 
-    try {
-      // Attach error handler BEFORE subscribing so that errors during
-      // subscribe or after connection loss are always caught and trigger
-      // a reconnection. Previously this was attached after the subscribe()
-      // calls, which meant if subscribe threw during an outage the handler
-      // was never attached and the subscriber was permanently dead.
-      subscriber.on('error', (err) => this.onSubscriberError(err));
-
-      await subscriber.connect();
-
-      const keyEvents = !this.customizedSync?.fieldsAreNotRedisKeys;
-
-      // Check if keyspace event configuration is set correctly
-      if (
-        keyEvents &&
-        (process.env.SKIP_KEYSPACE_CONFIG_CHECK || '').toUpperCase() !== 'TRUE'
-      ) {
-        const keyspaceEventConfig = (
-          await subscriber.configGet('notify-keyspace-events')
-        )?.['notify-keyspace-events'];
-        if (!keyspaceEventConfig.includes('E')) {
-          throw new Error(
-            'Keyspace event configuration is set to "' +
-              keyspaceEventConfig +
-              " but has to include 'E' for Keyevent events, " +
-              'published with __keyevent@<db>__ prefix. We recommend to set it to ' +
-              "'Exe' like so `redis-cli -h localhost config set notify-keyspace-events Exe`",
-          );
-        }
-        if (
-          !keyspaceEventConfig.includes('A') &&
-          !(
-            keyspaceEventConfig.includes('x') &&
-            keyspaceEventConfig.includes('e')
-          )
-        ) {
-          throw new Error(
-            'Keyspace event configuration is set to "' +
-              keyspaceEventConfig +
-              " but has to include 'A' or 'x' and 'e' for expired and " +
-              'evicted events. We recommend to set it to ' +
-              "'Exe' like so `redis-cli -h localhost config set notify-keyspace-events Exe`",
-          );
-        }
-      }
-
-      await Promise.all([
-        // We use a custom channel for insert/delete For the following reason:
-        // With custom channel we can delete multiple entries in one message. If we would listen to unlink / del we
-        // could get thousands of messages for one revalidateTag (For example revalidateTag("algolia") would send an enormous amount of network packages)
-        // Also we can send the value in the message for insert
-        subscriber.subscribe(this.syncChannel, syncHandler),
-        // Subscribe to Redis keyevent notifications for evicted and expired keys
-        ...(keyEvents
-          ? [
-              subscriber.subscribe(
-                `__keyevent@${this.database}__:evicted`,
-                keyEventHandler,
-              ),
-              subscriber.subscribe(
-                `__keyevent@${this.database}__:expired`,
-                keyEventHandler,
-              ),
-            ]
-          : []),
-      ]);
-    } catch (error) {
-      console.error('Error setting up pub/sub client:', error);
-      throw error;
+    // Expired and evicted cache keys. Tag-manifest fields are not Redis keys.
+    if (this.customizedSync?.fieldsAreNotRedisKeys) {
+      return [[this.syncChannel, syncHandler]];
     }
-  }
-
-  /**
-   * Replace the subscriber client and subscribe again, with exponential
-   * backoff until it works. Concurrent callers (setup and every error event
-   * during an outage) share one attempt loop.
-   */
-  private reconnectSubscriber(): Promise<void> {
-    this.subscriberSetup ??= this.retryUntilSuccess(
-      'Subscriber setup',
-      async () => {
-        // Forcibly tear down the old subscriber so its internal reconnect
-        // loop cannot come back to life once Redis recovers. `quit()` waits
-        // for the server and can silently fail during an outage, leaving a
-        // zombie client that still fires our error handler. Remove that
-        // handler first so a delayed error from the old socket cannot tear
-        // down the replacement subscriber we are about to create.
-        await this.disconnectSubscriber(this.subscriberClient);
-        const subscriber = this.client.duplicate();
-        this.subscriberClient = subscriber;
-        await this.setupPubSub(subscriber);
-        if (this.closed) await this.disconnectSubscriber(subscriber);
-      },
-    ).finally(() => {
-      this.subscriberSetup = undefined;
-    });
-    return this.subscriberSetup;
+    return [
+      [this.syncChannel, syncHandler],
+      [`__keyevent@${this.database}__:evicted`, keyEventHandler],
+      [`__keyevent@${this.database}__:expired`, keyEventHandler],
+    ];
   }
 
   private recordSetupError(error: unknown) {

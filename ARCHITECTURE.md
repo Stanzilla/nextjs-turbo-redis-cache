@@ -122,6 +122,8 @@ Every `set()` writes to both the local map **and** a Redis Hash (`HSET`). On sta
 
 Every `set()` and `delete()` also publishes a message on a dedicated channel. All other instances subscribe and apply the change to their local map immediately. This avoids the need for polling.
 
+A subscriber connection cannot send normal commands, so each handler opens one extra connection (`createRedisSubscriptions()`). All maps of the handler share it. When it is lost, every map is not ready until the connection subscribes again and the map reloads its hash, because messages published during the gap are lost.
+
 ```mermaid
 sequenceDiagram
     participant I1 as Instance 1
