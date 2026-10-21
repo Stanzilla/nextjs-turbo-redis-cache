@@ -853,9 +853,13 @@ export default class RedisStringsHandler {
         rest,
       );
       const tags = new Set([tagOrTags || []].flat());
-      await this.assertClientIsReady(this.writeTimeoutMs);
-      if (this.isClientUnavailable()) {
+      if (this.redisConnectionDeferred) {
         return;
+      }
+      if (!this.client.isReady) {
+        throw new RedisNotReadyError(
+          'RedisStringsHandler.revalidateTag(): Redis client is not ready yet or connection is lost.',
+        );
       }
 
       // Start every write before waiting, so that one deadline bounds them
@@ -865,7 +869,8 @@ export default class RedisStringsHandler {
       // Record every tag. The unlink below cannot find a FETCH entry that
       // only gets an implicit page tag (_N_T_...) from ctx at read time, or a
       // write that reaches Redis after the unlink. get() compares the entry
-      // with this record and drops it when the entry is older.
+      // with this record and drops it when the entry is older. The record
+      // does not need loaded maps, so it is written also while they load.
       const now = Date.now();
       for (const tag of tags) {
         debug(
@@ -878,7 +883,21 @@ export default class RedisStringsHandler {
         writes.push(this.revalidatedTagsMap.set(tag, now));
       }
 
-      const keysToDelete = this.keysWithAnyTag(tags);
+      // The unlink needs the loaded sharedTagsMap to find the keys. Without
+      // it the stale entries stay in Redis until they expire, and the tag
+      // records make every get() drop them.
+      const keysToDelete = await this.sharedTagsMap
+        .waitUntilReady(this.writeTimeoutMs)
+        .then(
+          () => this.keysWithAnyTag(tags),
+          (error) => {
+            console.warn(
+              'RedisStringsHandler.revalidateTag() does not unlink the tagged keys, because the tag map is not ready:',
+              error,
+            );
+            return new Set<string>();
+          },
+        );
 
       debug(
         'red',
