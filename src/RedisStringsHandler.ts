@@ -862,6 +862,23 @@ export default class RedisStringsHandler {
         );
       }
 
+      // The unlink needs the loaded sharedTagsMap to find the keys. Without
+      // it the stale entries stay in Redis until they expire, and the tag
+      // records below make every get() drop them. Wait before the first
+      // write, so that no write can reject while nothing awaits it.
+      const keysToDelete = await this.sharedTagsMap
+        .waitUntilReady(this.writeTimeoutMs)
+        .then(
+          () => this.keysWithAnyTag(tags),
+          (error) => {
+            console.warn(
+              'RedisStringsHandler.revalidateTag() does not unlink the tagged keys, because the tag map is not ready:',
+              error,
+            );
+            return new Set<string>();
+          },
+        );
+
       // Start every write before waiting, so that one deadline bounds them
       // all and a timeout does not skip the writes after it.
       const writes: Promise<unknown>[] = [];
@@ -882,22 +899,6 @@ export default class RedisStringsHandler {
         );
         writes.push(this.revalidatedTagsMap.set(tag, now));
       }
-
-      // The unlink needs the loaded sharedTagsMap to find the keys. Without
-      // it the stale entries stay in Redis until they expire, and the tag
-      // records make every get() drop them.
-      const keysToDelete = await this.sharedTagsMap
-        .waitUntilReady(this.writeTimeoutMs)
-        .then(
-          () => this.keysWithAnyTag(tags),
-          (error) => {
-            console.warn(
-              'RedisStringsHandler.revalidateTag() does not unlink the tagged keys, because the tag map is not ready:',
-              error,
-            );
-            return new Set<string>();
-          },
-        );
 
       debug(
         'red',
