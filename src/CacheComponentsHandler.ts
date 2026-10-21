@@ -577,7 +577,6 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
     durations?: { expire?: number },
   ): Promise<void> {
     try {
-      await this.assertClientIsReady(this.writeTimeoutMs);
       if (this.redisConnectionDeferred) {
         return;
       }
@@ -588,6 +587,18 @@ class RedisCacheComponentsHandler implements CacheComponentsHandler {
           'RedisCacheComponentsHandler.updateTags(): Redis client is not ready yet or connection is lost.',
         );
       }
+      // The update merges with the manifest in the map. While the map loads,
+      // an older hard expire of the tag can be missing from the merge, and
+      // becomes a stale window. That is better than a lost update, because
+      // Next.js does not retry it.
+      await this.revalidatedTagsMap
+        .waitUntilReady(this.writeTimeoutMs)
+        .catch((error) =>
+          console.warn(
+            'RedisCacheComponentsHandler.updateTags() merges with an incomplete tag manifest, because the tag map is not ready:',
+            error,
+          ),
+        );
 
       // Next.js rounds the clock when it writes a tag update, and does not
       // round it when it reads. We do the same, so both handlers decide the
