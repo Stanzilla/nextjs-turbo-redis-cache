@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - main
+      - faceit
   pull_request:
     branches:
       - main
+      - faceit
 
 permissions:
   contents: read
