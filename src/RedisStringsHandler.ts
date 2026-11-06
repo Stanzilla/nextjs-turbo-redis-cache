@@ -938,10 +938,11 @@ export default class RedisStringsHandler {
             ),
         );
 
-        // Keep the sharedTagsMap memberships. Another instance can write a
-        // replacement and its membership after the UNLINK, and a HDEL here
-        // would remove that membership. The orphan cleanup removes a
-        // membership once its key is gone.
+        // Keep the tag records. A page can render again right after the
+        // UNLINK, and a delete that reaches Redis after its write would remove
+        // the new record, so no pod that loads the hash later can invalidate
+        // the new entry. The orphan cleanup removes the records of keys that
+        // are gone.
       }
 
       await untilDeadline(
