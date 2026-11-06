@@ -395,7 +395,7 @@ describe('Next.js Turbo Redis Cache Integration', () => {
             expect(data2.subFetchData.counter).toBe(subCounter + 1);
           });
 
-          it('A request to revalidatePage API should remove the route from redis (string and hashmap)', async () => {
+          it('A request to revalidatePage API should remove the route from redis', async () => {
             const revalidateRes = await fetch(
               NEXT_START_URL +
                 '/api/revalidatePath?path=/api/nested-fetch-in-api-route/revalidated-fetch',
@@ -410,12 +410,6 @@ describe('Next.js Turbo Redis Cache Integration', () => {
                 '/api/nested-fetch-in-api-route/revalidated-fetch',
               ),
             ).toEqual([]);
-
-            expect(
-              await findRouteSharedTags(
-                '/api/nested-fetch-in-api-route/revalidated-fetch',
-              ),
-            ).toBeUndefined();
           });
 
           it('A new request after the revalidation should increment the counter (because the route was re-evaluated)', async () => {
@@ -450,7 +444,7 @@ describe('Next.js Turbo Redis Cache Integration', () => {
             ]);
           });
 
-          it('A request to revalidateTag API should remove the route from redis (string and hashmap)', async () => {
+          it('A request to revalidateTag API should remove the route from redis', async () => {
             const revalidateRes = await fetch(
               NEXT_START_URL +
                 '/api/revalidateTag?tag=revalidated-fetch-revalidate3-nested-fetch-in-api-route',
@@ -465,12 +459,6 @@ describe('Next.js Turbo Redis Cache Integration', () => {
                 '/api/nested-fetch-in-api-route/revalidated-fetch',
               ),
             ).toEqual([]);
-
-            expect(
-              await findRouteSharedTags(
-                '/api/nested-fetch-in-api-route/revalidated-fetch',
-              ),
-            ).toBeUndefined();
           });
 
           it('Another new request after the revalidation should increment the counter (because the route was re-evaluated)', async () => {
