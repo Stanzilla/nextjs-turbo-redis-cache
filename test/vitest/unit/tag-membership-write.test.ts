@@ -5,6 +5,8 @@ import RedisStringsHandler from '../../../src/RedisStringsHandler';
 const hoisted = vi.hoisted(() => ({
   strings: new Map<string, string>(),
   hashes: new Map<string, Map<string, string>>(),
+  // Delays the effect of the next HDEL, as a slow network can.
+  hDelHold: undefined as Promise<void> | undefined,
 }));
 
 function hash(name: string) {
@@ -46,6 +48,9 @@ vi.mock('redis', () => ({
       return 1;
     }),
     hDel: vi.fn(async (name: string, fields: string | string[]) => {
+      const hold = hoisted.hDelHold;
+      hoisted.hDelHold = undefined;
+      await hold;
       for (const field of [fields].flat()) hash(name).delete(field);
       return 1;
     }),
@@ -79,6 +84,7 @@ describe('RedisStringsHandler tag membership writes', () => {
   beforeEach(() => {
     hoisted.strings.clear();
     hoisted.hashes.clear();
+    hoisted.hDelHold = undefined;
     vi.stubEnv('SKIP_KEYSPACE_CONFIG_CHECK', 'TRUE');
   });
 
@@ -128,6 +134,29 @@ describe('RedisStringsHandler tag membership writes', () => {
       expect(hoisted.strings.has(PREFIX + 'c')).toBe(true);
     },
   );
+
+  it('keeps the membership of an entry written again while revalidateTag runs', async () => {
+    const handler = createHandler();
+    await handler.set('k', fetchData('v1'), { tags: ['posts'] } as never);
+
+    let releaseHDel!: () => void;
+    hoisted.hDelHold = new Promise((resolve) => (releaseHDel = resolve));
+    const revalidation = handler.revalidateTag('posts');
+    await vi.waitFor(() =>
+      expect(hoisted.strings.has(PREFIX + 'k')).toBe(false),
+    );
+    // The page renders again right after the UNLINK, and its writes reach
+    // Redis before the HDEL of the first invalidation.
+    await handler.set('k', fetchData('v2'), { tags: ['posts'] } as never);
+    releaseHDel?.();
+    await revalidation;
+    expect(hoisted.strings.has(PREFIX + 'k')).toBe(true);
+
+    // A pod that starts or reloads its tag map reads the Redis hash.
+    const otherPod = createHandler();
+    await otherPod.revalidateTag('posts');
+    expect(hoisted.strings.has(PREFIX + 'k')).toBe(false);
+  });
 
   it('does not change the tags of the caller context', async () => {
     const handler = createHandler();

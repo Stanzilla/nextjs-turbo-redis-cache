@@ -928,8 +928,11 @@ export default class RedisStringsHandler {
         // this instance has no in-memory cache: peers can have other settings
         writes.push(this.invalidateDeduplicationCache(redisKeys));
 
-        // prepare deletion of entries from shared tags map if they get revalidated so that the map will not grow indefinitely
-        writes.push(this.sharedTagsMap.delete(redisKeys));
+        // Keep the tag records. A page can render again right after the
+        // UNLINK, and a delete that reaches Redis after its write would remove
+        // the new record, so no pod that loads the hash later can invalidate
+        // the new entry. The orphan cleanup removes the records of keys that
+        // are gone.
       }
 
       await untilDeadline(
