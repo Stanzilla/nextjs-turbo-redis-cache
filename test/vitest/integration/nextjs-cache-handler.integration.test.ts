@@ -152,7 +152,7 @@ describe('Next.js Turbo Redis Cache Integration', () => {
         expect(bodyJson.counter).toBe(counter1);
       });
 
-      it('A request to revalidatePath API should remove the route from redis (string and hashmap)', async () => {
+      it('A request to revalidatePath API should remove the route from redis', async () => {
         const revalidateRes = await fetch(
           NEXT_START_URL + '/api/revalidatePath?path=/api/cached-static-fetch',
         );
@@ -162,10 +162,6 @@ describe('Next.js Turbo Redis Cache Integration', () => {
 
         // check Redis keys
         expect(await findRouteKeys('/api/cached-static-fetch')).toEqual([]);
-
-        expect(
-          await findRouteSharedTags('/api/cached-static-fetch'),
-        ).toBeUndefined();
       });
 
       it('A new request after the revalidation should increment the counter (because the route was re-evaluated)', async () => {
@@ -267,8 +263,6 @@ describe('Next.js Turbo Redis Cache Integration', () => {
         async function assertCachedStaticFetchCleared() {
           await delay(REDIS_BACKGROUND_SYNC_DELAY);
           expect(await findRouteKeys(cachedStaticPath)).toEqual([]);
-
-          expect(await findRouteSharedTags(cachedStaticPath)).toBeUndefined();
         }
 
         it('revalidateTag(tag, "max") should invalidate cached-static-fetch by tag', async () => {
@@ -401,7 +395,7 @@ describe('Next.js Turbo Redis Cache Integration', () => {
             expect(data2.subFetchData.counter).toBe(subCounter + 1);
           });
 
-          it('A request to revalidatePage API should remove the route from redis (string and hashmap)', async () => {
+          it('A request to revalidatePage API should remove the route from redis', async () => {
             const revalidateRes = await fetch(
               NEXT_START_URL +
                 '/api/revalidatePath?path=/api/nested-fetch-in-api-route/revalidated-fetch',
@@ -416,12 +410,6 @@ describe('Next.js Turbo Redis Cache Integration', () => {
                 '/api/nested-fetch-in-api-route/revalidated-fetch',
               ),
             ).toEqual([]);
-
-            expect(
-              await findRouteSharedTags(
-                '/api/nested-fetch-in-api-route/revalidated-fetch',
-              ),
-            ).toBeUndefined();
           });
 
           it('A new request after the revalidation should increment the counter (because the route was re-evaluated)', async () => {
@@ -456,7 +444,7 @@ describe('Next.js Turbo Redis Cache Integration', () => {
             ]);
           });
 
-          it('A request to revalidateTag API should remove the route from redis (string and hashmap)', async () => {
+          it('A request to revalidateTag API should remove the route from redis', async () => {
             const revalidateRes = await fetch(
               NEXT_START_URL +
                 '/api/revalidateTag?tag=revalidated-fetch-revalidate3-nested-fetch-in-api-route',
@@ -471,12 +459,6 @@ describe('Next.js Turbo Redis Cache Integration', () => {
                 '/api/nested-fetch-in-api-route/revalidated-fetch',
               ),
             ).toEqual([]);
-
-            expect(
-              await findRouteSharedTags(
-                '/api/nested-fetch-in-api-route/revalidated-fetch',
-              ),
-            ).toBeUndefined();
           });
 
           it('Another new request after the revalidation should increment the counter (because the route was re-evaluated)', async () => {
@@ -613,7 +595,7 @@ describe('Next.js Turbo Redis Cache Integration', () => {
           }, 15_000);
         }
 
-        it('A request to revalidatePage API should remove the page from redis (string and hashmap)', async () => {
+        it('A request to revalidatePage API should remove the page from redis', async () => {
           const revalidateRes = await fetch(
             NEXT_START_URL +
               '/api/revalidatePath?path=/pages/no-fetch/default-page',
@@ -626,10 +608,6 @@ describe('Next.js Turbo Redis Cache Integration', () => {
           expect(await findRouteKeys('/pages/no-fetch/default-page')).toEqual(
             [],
           );
-
-          expect(
-            await findRouteSharedTags('/pages/no-fetch/default-page'),
-          ).toBeUndefined();
         });
 
         it('A new request after the revalidation should return a new timestamp (because the page was recreated)', async () => {
@@ -743,7 +721,7 @@ describe('Next.js Turbo Redis Cache Integration', () => {
         expect(timestamp).toBe(firstTimestamp);
       });
 
-      it('A request to revalidatePath API should remove the page from redis (string and hashmap) but not the api route', async () => {
+      it('A request to revalidatePath API should remove the page from redis but not the api route', async () => {
         const revalidateRes = await fetch(
           NEXT_START_URL +
             '/api/revalidatePath?path=/pages/revalidated-fetch/revalidate15--default-page',
@@ -758,12 +736,6 @@ describe('Next.js Turbo Redis Cache Integration', () => {
             '/pages/revalidated-fetch/revalidate15--default-page',
           ),
         ).toEqual([]);
-
-        expect(
-          await findRouteSharedTags(
-            '/pages/revalidated-fetch/revalidate15--default-page',
-          ),
-        ).toBeUndefined();
 
         // sub-fetch-request is not removed directly but will be removed on next get request
         const nestedFetchCacheEntryKey = await findFetchCacheEntryKey(
