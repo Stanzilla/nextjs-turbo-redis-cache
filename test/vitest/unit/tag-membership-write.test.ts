@@ -5,6 +5,8 @@ import RedisStringsHandler from '../../../src/RedisStringsHandler';
 const hoisted = vi.hoisted(() => ({
   strings: new Map<string, string>(),
   hashes: new Map<string, Map<string, string>>(),
+  // When set, HDEL removes the fields only after this promise.
+  holdHDel: undefined as Promise<void> | undefined,
 }));
 
 function hash(name: string) {
@@ -31,6 +33,7 @@ vi.mock('redis', () => ({
       hoisted.strings.set(key, value);
       return 'OK';
     }),
+    exists: vi.fn(async (key: string) => (hoisted.strings.has(key) ? 1 : 0)),
     unlink: vi.fn(async (keys: string | string[]) => {
       const list = Array.isArray(keys) ? keys : [keys];
       for (const key of list) hoisted.strings.delete(key);
@@ -46,6 +49,7 @@ vi.mock('redis', () => ({
       return 1;
     }),
     hDel: vi.fn(async (name: string, fields: string | string[]) => {
+      await hoisted.holdHDel;
       for (const field of [fields].flat()) hash(name).delete(field);
       return 1;
     }),
@@ -79,6 +83,7 @@ describe('RedisStringsHandler tag membership writes', () => {
   beforeEach(() => {
     hoisted.strings.clear();
     hoisted.hashes.clear();
+    hoisted.holdHDel = undefined;
     vi.stubEnv('SKIP_KEYSPACE_CONFIG_CHECK', 'TRUE');
   });
 
@@ -97,6 +102,30 @@ describe('RedisStringsHandler tag membership writes', () => {
     await handler.set('k', fetchData('v2'), { tags: ['posts'] } as never);
 
     expect(JSON.parse(hash(TAGS_HASH).get('k')!)).toEqual(['posts']);
+  });
+
+  it('keeps the membership of an entry that another instance writes while revalidateTag() runs', async () => {
+    const writer = createHandler();
+    await writer.set('k', fetchData('v1'), { tags: ['posts'] } as never);
+    const invalidator = createHandler();
+    let releaseHDel!: () => void;
+    hoisted.holdHDel = new Promise((resolve) => (releaseHDel = resolve));
+
+    const revalidation = invalidator.revalidateTag('posts');
+    await vi.waitFor(() =>
+      expect(hoisted.strings.has(PREFIX + 'k')).toBe(false),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await writer.set('k', fetchData('v2'), { tags: ['posts'] } as never);
+    releaseHDel();
+    await revalidation;
+
+    expect(hash(TAGS_HASH).has('k')).toBe(true);
+    // A new instance loads the memberships from Redis, so it can still
+    // remove the replacement on the next invalidation.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await createHandler().revalidateTag('posts');
+    expect(hoisted.strings.has(PREFIX + 'k')).toBe(false);
   });
 
   it('removes the old membership when an untagged entry replaces a tagged one', async () => {
