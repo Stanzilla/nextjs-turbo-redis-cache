@@ -911,22 +911,32 @@ export default class RedisStringsHandler {
         // prepare deletion of all keys in redis that are related to this tag
         const redisKeys = Array.from(keysToDelete);
         const fullRedisKeys = redisKeys.map((key) => this.keyPrefix + key);
-        // Send one UNLINK for each key. A Redis cluster rejects a command
-        // with keys in different hash slots. The client sends these
+        // Drop the in-memory copies on every instance before the values leave
+        // Redis, also when this instance has no in-memory cache: peers can
+        // have other settings. A failed message must not stop the unlink.
+        // Then send one UNLINK for each key. A Redis cluster rejects a
+        // command with keys in different hash slots. The client sends these
         // commands together in one round trip.
         writes.push(
-          redisErrorHandler(
-            'RedisStringsHandler.revalidateTag(), operation: unlink ' +
-              this.keyPrefix +
-              ' ' +
-              fullRedisKeys,
-            Promise.all(fullRedisKeys.map((key) => this.client.unlink(key))),
-          ),
+          this.invalidateDeduplicationCache(redisKeys)
+            .catch((error) => {
+              console.error(
+                'RedisStringsHandler.revalidateTag() could not tell the other instances to drop their in-memory copies. Unlinking the keys regardless. The original error was:',
+                error,
+              );
+            })
+            .then(() =>
+              redisErrorHandler(
+                'RedisStringsHandler.revalidateTag(), operation: unlink ' +
+                  this.keyPrefix +
+                  ' ' +
+                  fullRedisKeys,
+                Promise.all(
+                  fullRedisKeys.map((key) => this.client.unlink(key)),
+                ),
+              ),
+            ),
         );
-
-        // also delete entries from the in-memory deduplication cache of every instance, also when
-        // this instance has no in-memory cache: peers can have other settings
-        writes.push(this.invalidateDeduplicationCache(redisKeys));
 
         // Keep the tag records. A page can render again right after the
         // UNLINK, and a delete that reaches Redis after its write would remove
