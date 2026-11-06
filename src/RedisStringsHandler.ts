@@ -1011,12 +1011,11 @@ export default class RedisStringsHandler {
           ),
         );
 
-        // Do not delete sharedTagsMap entries here. A fresh set() can write a
-        // replacement value and tag association immediately after UNLINK; an
-        // unconditional HDEL would remove that fresh association. Stale tag
-        // metadata is harmless for correctness and is removed by SyncedMap's
-        // periodic orphan cleanup, which compares the tag hash against live
-        // Redis keys.
+        // Keep the tag records. A page can render again right after the
+        // UNLINK, and a delete that reaches Redis after its write would remove
+        // the new record, so no pod that loads the hash later can invalidate
+        // the new entry. The orphan cleanup removes the records of keys that
+        // are gone.
       }
 
       await untilDeadline(
