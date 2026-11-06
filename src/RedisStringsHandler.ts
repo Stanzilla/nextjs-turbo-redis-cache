@@ -28,8 +28,8 @@ import {
 import { createCacheClient } from './utils/cacheClient';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
-import { clusterSafeUnlink } from './utils/clusterSafeUnlink';
 import { compareAndUnlink } from './utils/compareAndUnlink';
+import { clusterSafeUnlink } from './utils/clusterSafeUnlink';
 import { TagIndex } from './utils/tagIndex';
 
 // Re-exported for imports that used this module before.
@@ -251,13 +251,6 @@ export type CreateRedisStringsHandlerOptions = {
   valueSerializer?: CacheValueSerializer;
 };
 
-// One SyncedMap.delete() publishes a single sync message for every key it
-// receives. Clearing the local read-through cache one key at a time therefore
-// turns a high-cardinality tag into one Redis publish per key, ahead of the
-// bounded UNLINK workers. Batch the keys, and cap each message so a very
-// large tag cannot produce an unbounded pub/sub payload either.
-const LOCAL_CACHE_DELETE_BATCH_SIZE = 500;
-
 // Identifier prefix used by Next.js to mark automatically generated cache tags
 // These tags are created internally by Next.js for route-based invalidation
 const NEXT_CACHE_IMPLICIT_TAG_ID = '_N_T_';
@@ -373,12 +366,12 @@ export default class RedisStringsHandler {
       this.redisGetDeduplication = redisGetDeduplication;
       this.defaultStaleAge = defaultStaleAge;
       this.estimateExpireAge = estimateExpireAge;
+      this.getTimeoutMs = getTimeoutMs;
+      this.writeTimeoutMs = writeTimeoutMs;
       this.revalidateTagDeleteConcurrency = Math.max(
         1,
         Math.floor(revalidateTagDeleteConcurrency),
       );
-      this.getTimeoutMs = getTimeoutMs;
-      this.writeTimeoutMs = writeTimeoutMs;
       this.valueSerializer = valueSerializer;
       this.redisConnectionDeferred = shouldDeferRedisConnection();
 
@@ -852,27 +845,6 @@ export default class RedisStringsHandler {
     }
   }
 
-  private async deleteLocalReadCacheKeys(keys: string[]): Promise<void> {
-    const errors: unknown[] = [];
-    for (let i = 0; i < keys.length; i += LOCAL_CACHE_DELETE_BATCH_SIZE) {
-      try {
-        await this.invalidateDeduplicationCache(
-          keys.slice(i, i + LOCAL_CACHE_DELETE_BATCH_SIZE),
-        );
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-    if (errors.length === 1) {
-      throw errors[0];
-    }
-    if (errors.length > 1) {
-      throw new Error(
-        `Failed to clear ${errors.length} local read-cache batches`,
-      );
-    }
-  }
-
   /** The cache keys that depend on at least one of the tags. */
   private keysWithAnyTag(tags: Set<string>): Set<string> {
     const index = this.sharedTagsMap.index;
@@ -949,66 +921,34 @@ export default class RedisStringsHandler {
       );
 
       if (keysToDelete.size > 0) {
-        // prepare deletion of all keys in redis that are related to this tag.
-        // Always slot-grouped, including standalone Redis. Cluster mode rejects
-        // one UNLINK whose keys span hash slots (CROSSSLOT). See
-        // clusterSafeUnlink for the protocol formula and the single-node cost:
-        // one command per occupied slot, bounded by
-        // revalidateTagDeleteConcurrency.
+        // prepare deletion of all keys in redis that are related to this tag
         const redisKeys = Array.from(keysToDelete);
         const fullRedisKeys = redisKeys.map((key) => this.keyPrefix + key);
-        const redisKeyByFullRedisKey = new Map(
-          fullRedisKeys.map((fullRedisKey, index) => [
-            fullRedisKey,
-            redisKeys[index]!,
-          ]),
-        );
-        // Peers can have other settings, so clear also without a local in-memory cache.
-        const clearLocalReadCache = true;
-
-        // Clear local read-through cache before deleting Redis values. With
-        // slot-grouped deletes, some Redis keys can be gone while other slots are
-        // still pending; clearing first prevents stale local reads in that window.
-        // This is a best-effort race-avoidance step: a failure here (e.g. the
-        // local cache's pub/sub notification could not be published) must not
-        // prevent the Redis UNLINKs below from running, since skipping the
-        // actual invalidation would be far worse than a brief stale-read window
-        // that resolves itself once the in-memory cache entry expires.
-        // The clearing publishes through Redis too, so it is part of the same
-        // write and the write deadline below bounds it.
-        const clearBeforeDelete = clearLocalReadCache
-          ? this.deleteLocalReadCacheKeys(redisKeys).catch((err) => {
+        // Drop the in-memory copies on every instance before the values leave
+        // Redis, also when this instance has no in-memory cache: peers can
+        // have other settings. A failed message must not stop the unlink.
+        // Then send one UNLINK for each hash slot. A Redis cluster rejects a
+        // command with keys in different hash slots.
+        writes.push(
+          this.invalidateDeduplicationCache(redisKeys)
+            .catch((error) => {
               console.error(
-                'RedisStringsHandler.revalidateTag() failed to clear local read-through cache before deletion. Continuing with Redis deletion regardless. Error was:',
-                err,
+                'RedisStringsHandler.revalidateTag() could not tell the other instances to drop their in-memory copies. Unlinking the keys regardless. The original error was:',
+                error,
               );
             })
-          : Promise.resolve();
-
-        writes.push(
-          clearBeforeDelete.then(() =>
-            redisErrorHandler(
-              'RedisStringsHandler.revalidateTag(), operation: cluster-safe unlink ' +
-                this.keyPrefix +
-                ' ' +
-                fullRedisKeys.length +
-                ' key(s)',
-              clusterSafeUnlink(this.client, fullRedisKeys, {
-                concurrency: this.revalidateTagDeleteConcurrency,
-                onGroupSuccess: async (deletedFullRedisKeys) => {
-                  if (clearLocalReadCache) {
-                    await this.deleteLocalReadCacheKeys(
-                      deletedFullRedisKeys.flatMap((fullRedisKey) => {
-                        const redisKey =
-                          redisKeyByFullRedisKey.get(fullRedisKey);
-                        return redisKey ? [redisKey] : [];
-                      }),
-                    );
-                  }
-                },
-              }),
+            .then(() =>
+              redisErrorHandler(
+                'RedisStringsHandler.revalidateTag(), operation: cluster-safe unlink ' +
+                  this.keyPrefix +
+                  ' ' +
+                  fullRedisKeys.length +
+                  ' key(s)',
+                clusterSafeUnlink(this.client, fullRedisKeys, {
+                  concurrency: this.revalidateTagDeleteConcurrency,
+                }),
+              ),
             ),
-          ),
         );
 
         // Keep the tag records. A page can render again right after the

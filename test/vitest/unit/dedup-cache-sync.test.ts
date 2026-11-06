@@ -10,6 +10,8 @@ const hoisted = vi.hoisted(() => {
   type Listener = ((message: string) => void) & { dropped?: () => boolean };
   const subscribers = new Map<string, Set<Listener>>();
   const published: { channel: string; message: string }[] = [];
+  // The order in which Redis gets read-cache messages and UNLINKs.
+  const order: ('read-cache message' | 'unlink')[] = [];
   const control = {
     failSet: false,
     // When set, GET reads the store at call time but resolves only after
@@ -18,7 +20,7 @@ const hoisted = vi.hoisted(() => {
     // When set, SET stores the value only after this promise.
     holdSet: undefined as Promise<void> | undefined,
   };
-  return { store, subscribers, published, control };
+  return { store, subscribers, published, order, control };
 });
 
 vi.mock('redis', () => {
@@ -52,6 +54,9 @@ vi.mock('redis', () => {
       ),
       publish: vi.fn(async (channel: string, message: string) => {
         hoisted.published.push({ channel, message });
+        if (channel.endsWith('inMemoryDeduplicationCache')) {
+          hoisted.order.push('read-cache message');
+        }
         const listeners = hoisted.subscribers.get(channel) ?? new Set();
         for (const listener of listeners) {
           if (!listener.dropped?.()) listener(message);
@@ -70,6 +75,7 @@ vi.mock('redis', () => {
         return 'OK';
       }),
       unlink: vi.fn(async (keys: string | string[]) => {
+        hoisted.order.push('unlink');
         const list = Array.isArray(keys) ? keys : [keys];
         for (const key of list) hoisted.store.delete(key);
         return list.length;
@@ -181,6 +187,7 @@ describe('in-memory read cache across instances', () => {
     hoisted.store.clear();
     hoisted.subscribers.clear();
     hoisted.published.length = 0;
+    hoisted.order.length = 0;
     hoisted.control.failSet = false;
     hoisted.control.holdGet = undefined;
     hoisted.control.holdSet = undefined;
@@ -303,6 +310,16 @@ describe('in-memory read cache across instances', () => {
     await writer.revalidateTag(`_N_T_${KEY}`);
 
     expect(await readHtml(reader)).toBeNull();
+  });
+
+  it('tells other instances to drop their cached copy before revalidateTag() unlinks the value', async () => {
+    const writer = createInstance(10_000);
+    await writer.set(KEY, page('v1'), setCtx);
+    hoisted.order.length = 0;
+
+    await writer.revalidateTag(`_N_T_${KEY}`);
+
+    expect(hoisted.order).toEqual(['read-cache message', 'unlink']);
   });
 
   // During a rolling deploy that turns the in-memory cache on, or with mixed
