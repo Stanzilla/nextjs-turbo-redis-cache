@@ -29,6 +29,7 @@ import { createCacheClient } from './utils/cacheClient';
 import { AbortableGet, createAbortableGet } from './utils/abortableGet';
 import { RedisTimeoutError, untilDeadline } from './utils/deadline';
 import { compareAndUnlink } from './utils/compareAndUnlink';
+import { clusterSafeUnlink } from './utils/clusterSafeUnlink';
 import { TagIndex } from './utils/tagIndex';
 
 // Re-exported for imports that used this module before.
@@ -213,6 +214,12 @@ export type CreateRedisStringsHandlerOptions = {
    * @default 0 (0 means no error threshold)
    */
   killContainerOnErrorThreshold?: number;
+  /** Maximum number of Redis hash slot groups deleted concurrently during tag invalidation.
+   *  Keeps Valkey/Redis cluster invalidation cluster-safe without creating unbounded
+   *  command bursts for high-cardinality tags.
+   * @default 16
+   */
+  revalidateTagDeleteConcurrency?: number;
   /** Additional Redis client socket options
    * @example { tls: true, rejectUnauthorized: false }
    */
@@ -323,6 +330,7 @@ export default class RedisStringsHandler {
   private errorBudget: ErrorBudget;
   private valueSerializer: CacheValueSerializer;
   private redisConnectionDeferred: boolean;
+  private revalidateTagDeleteConcurrency: number;
 
   constructor(options: CreateRedisStringsHandlerOptions) {
     const {
@@ -348,6 +356,7 @@ export default class RedisStringsHandler {
         process.env.VERCEL_ENV === 'production' ? staleAge * 2 : staleAge * 1.2,
       valueSerializer = jsonCacheValueSerializer,
       tagIndex = false,
+      revalidateTagDeleteConcurrency = 16,
     } = options;
     this.errorBudget = new ErrorBudget(killContainerOnErrorThreshold, () =>
       disconnectAndExit(this.client),
@@ -359,6 +368,10 @@ export default class RedisStringsHandler {
       this.estimateExpireAge = estimateExpireAge;
       this.getTimeoutMs = getTimeoutMs;
       this.writeTimeoutMs = writeTimeoutMs;
+      this.revalidateTagDeleteConcurrency = Math.max(
+        1,
+        Math.floor(revalidateTagDeleteConcurrency),
+      );
       this.valueSerializer = valueSerializer;
       this.redisConnectionDeferred = shouldDeferRedisConnection();
 
@@ -914,9 +927,8 @@ export default class RedisStringsHandler {
         // Drop the in-memory copies on every instance before the values leave
         // Redis, also when this instance has no in-memory cache: peers can
         // have other settings. A failed message must not stop the unlink.
-        // Then send one UNLINK for each key. A Redis cluster rejects a
-        // command with keys in different hash slots. The client sends these
-        // commands together in one round trip.
+        // Then send one UNLINK for each hash slot. A Redis cluster rejects a
+        // command with keys in different hash slots.
         writes.push(
           this.invalidateDeduplicationCache(redisKeys)
             .catch((error) => {
@@ -927,13 +939,14 @@ export default class RedisStringsHandler {
             })
             .then(() =>
               redisErrorHandler(
-                'RedisStringsHandler.revalidateTag(), operation: unlink ' +
+                'RedisStringsHandler.revalidateTag(), operation: cluster-safe unlink ' +
                   this.keyPrefix +
                   ' ' +
-                  fullRedisKeys,
-                Promise.all(
-                  fullRedisKeys.map((key) => this.client.unlink(key)),
-                ),
+                  fullRedisKeys.length +
+                  ' key(s)',
+                clusterSafeUnlink(this.client, fullRedisKeys, {
+                  concurrency: this.revalidateTagDeleteConcurrency,
+                }),
               ),
             ),
         );
