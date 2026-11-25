@@ -22,6 +22,8 @@ For a deep dive into the internal architecture (shared hash maps, SyncedMap, req
 This package is compatible with Next.js 15.0.3 and above, with the App Router, the Pages Router, or both together in a hybrid app. It is not compatible with Next.js 14.x. or 15-canary.
 Redis Server need to have Redis Server Version 2.8.0 or higher and have to be configured with `notify-keyspace-events` to be able to use the key-space notifications feature.
 
+The package supports the `redis` client package (node-redis) in version 4.7.0, 5.x and 6.x. Install the version you want next to this package. node-redis 6 needs Node.js 20 or higher.
+
 Pages Router support covers ISR pages (`getStaticProps` + `revalidate`, `getStaticPaths` with `fallback`), `notFound: true` and `redirect:` results, and on-demand revalidation via `res.revalidate(path)` — including across multiple server instances sharing one Redis (see the two-instance integration test). App Router and Pages Router entries are handled side by side by the same handler instance, so hybrid apps that use both routers work without any extra configuration.
 
 Tested versions are:
@@ -34,13 +36,22 @@ Tested versions are:
 - Nextjs 16.2.6 + redis client 4.7.0 (cacheComponents: false)
 - Nextjs 16.2.6 + redis client 4.7.0 (cacheComponents: true)
 - Nextjs 16.2.6 + redis client 4.7.0 (Pages Router)
-- Nextjs 16.3.0 + redis client 4.7.0 (cacheComponents: false)
-- Nextjs 16.3.0 + redis client 4.7.0 (cacheComponents: true)
+- Nextjs 16.3.0 + redis client 6.3.0 (cacheComponents: false)
+- Nextjs 16.3.0 + redis client 6.3.0 (cacheComponents: true)
 - Nextjs 16.3.0 + redis client 4.7.0 (Pages Router)
+- Nextjs 16.4.2 + redis client 4.7.0 (cacheComponents: false)
+- Nextjs 16.4.2 + redis client 4.7.0 (cacheComponents: true)
+- Nextjs 16.4.2 + redis client 4.7.0 (Pages Router)
 
 _Cache Components_ (Next.js 16+) are fully supported. Automated test coverage includes `'use cache'`, `cacheTag`, and `cacheLife` flows in the Cache Components integration suite.
 
+If you use Cache Components, use Next.js 16.4.1 or higher. Next.js 16.0.0 to 16.4.0 have a critical remote code execution vulnerability in `'use cache'` functions ([GHSA-673q-mjm6-r5xr](https://github.com/vercel/next.js/security/advisories/GHSA-673q-mjm6-r5xr)).
+
 For Cache Components, see the "Cache Components handler (Next.js 16+)" section below.
+
+### Upgrade from Next.js 16.3 to 16.4
+
+Next.js 16.4 changed the cache keys of routes (App Router pages, App Router route handlers and Pages Router pages). The new keys have the form `/route-cache/<kind>/<hash>/$/<path>`. Thus, after the upgrade, the cache is empty for these entries and Next.js renders them again on the first request. The keys of `fetch` entries and the stored value format did not change. Old route keys stay in Redis until their TTL expires. You do not have to delete them.
 
 ## Getting started
 
@@ -75,6 +86,8 @@ There exists also the SKIP_KEYSPACE_CONFIG_CHECK environment variable to skip th
 KILL_CONTAINER_ON_ERROR_THRESHOLD: Optional environment variable that defines how many Redis client errors should occur before the process exits with code 1. This is useful in container environments like Kubernetes where you want the container to restart if Redis connectivity issues persist. Set to 0 (default) to disable this feature. For example, setting KILL_CONTAINER_ON_ERROR_THRESHOLD=10 will exit the process after 10 Redis client errors, allowing the container orchestrator to restart the container.
 
 REDIS_COMMAND_TIMEOUT_MS: Optional environment variable that sets the timeout in milliseconds for Redis get command. If not set, defaults to 500ms. The value is parsed as an integer, and if parsing fails, falls back to the 500ms default.
+
+REDIS_WRITE_TIMEOUT_MS: Optional environment variable that sets the timeout in milliseconds for the Redis writes that a request waits for (`set`, `revalidateTag`, and `updateTags` for Cache Components). If Redis does not confirm the writes within this time, `set` and `updateTags` log a warning and return, so that a Redis that stops answering does not block the request. `revalidateTag` logs an error and throws, because a lost invalidation leaves stale entries on every instance. The write can still be applied later, or be lost. If not set, 0 or not a number, the get timeout is used.
 
 ### Option A: minimum implementation with default options
 
@@ -156,6 +169,7 @@ A working example of above can be found in the `test/nextjs-test-projects/next-a
 | keyPrefix                     | Prefix added to all Redis keys                                                                                                                                                                                                                                                         | `RedisStringsHandler` default: `process.env.KEY_PREFIX \|\| process.env.VERCEL_URL \|\| 'UNDEFINED_URL_'`<br> Next handlers resolve: `options.keyPrefix \|\| KEY_PREFIX \|\| VERCEL_URL \|\| BUILD_ID \|\| 'UNDEFINED_URL_'` |
 | sharedTagsKey                 | Key used to store shared tags hash map in Redis                                                                                                                                                                                                                                        | `'__sharedTags__'`                                                                                                                                                                                                           |
 | getTimeoutMs                  | Timeout in milliseconds for time critical Redis operations. If Redis get is not fulfilled within this time, returns null to avoid blocking site rendering.                                                                                                                             | `process.env.REDIS_COMMAND_TIMEOUT_MS ? (Number.parseInt(process.env.REDIS_COMMAND_TIMEOUT_MS) ?? 500) : 500`                                                                                                                |
+| writeTimeoutMs                | Timeout in milliseconds for the Redis writes that a request waits for. If Redis does not confirm a write within this time, `set` logs a warning and returns instead of blocking the request; `revalidateTag` throws.                                                                   | `process.env.REDIS_WRITE_TIMEOUT_MS ? (Number.parseInt(process.env.REDIS_WRITE_TIMEOUT_MS) \|\| getTimeoutMs) : getTimeoutMs`                                                                                                |
 | revalidateTagQuerySize        | Number of entries to query in one batch during full sync of shared tags hash map                                                                                                                                                                                                       | `250`                                                                                                                                                                                                                        |
 | avgResyncIntervalMs           | Average interval in milliseconds between tag map full re-syncs                                                                                                                                                                                                                         | `3600000` (1 hour)                                                                                                                                                                                                           |
 | redisGetDeduplication         | Enable deduplication of Redis get requests via internal in-memory cache.                                                                                                                                                                                                               | `true`                                                                                                                                                                                                                       |
@@ -556,6 +570,7 @@ Optional:
 
 - `VERCEL_URL`: used as a key prefix for multi-tenant isolation (also useful in tests). If unset, a default prefix is used.
 - `REDIS_COMMAND_TIMEOUT_MS`: timeout (ms) for Redis commands used by the handler.
+- `REDIS_WRITE_TIMEOUT_MS`: timeout (ms) for the Redis writes that a request waits for. Defaults to the get timeout.
 
 ### Official caching semantics (Vercel / Next.js self-hosting docs)
 
@@ -564,6 +579,7 @@ This package follows the semantics documented in the [Next.js self-hosting guide
 | Topic                             | Behavior                                                                                                                                                                                                                                                                                                     |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **ISR Redis TTL**                 | Key TTL on `cacheControl.expire`, not `revalidate`. Past `revalidate` an entry is only stale (SWR); evicting at that boundary would defeat background refresh. Legacy callers that only pass `revalidate` still get `estimateExpireAge(revalidate)`.                                                         |
+| **Entry lifetime (ISR)**          | `set()` stores `ctx.cacheControl` in the entry and `get()` returns it. Next.js 16.4+ then uses the lifetime of the instance that rendered the entry on every instance that shares Redis, also after a restart or on an instance that did not render the route. Older versions ignore it.                     |
 | **Tag sources (ISR)**             | `APP_PAGE` / `APP_ROUTE` tags come from `data.headers['x-next-cache-tags']` plus `ctx.tags`. `FETCH` tags come from `ctx.tags`.                                                                                                                                                                              |
 | **Buffer / Map serialization**    | `rscData` (`Buffer`) and `segmentData` (`Map`) require custom JSON encoding — use the built-in `jsonCacheValueSerializer` or wrap it. Plain `JSON.stringify` causes `segmentData.get is not a function` on RSC navigation.                                                                                   |
 | **`updateTags(tags, durations)`** | Persists Next.js tag-manifest fields in Redis (`stale` / `expired`). No `durations` or `{ expire: 0 }` hard-expires (`expired = now`). `expire > 0` (including `'max'` ~1 year) is the SWR window: `stale = now`, `expired = now + expire * 1000`, and `get()` returns `revalidate: -1` until that deadline. |
