@@ -106,7 +106,7 @@ flowchart LR
     end
 ```
 
-When `revalidateTag("product")` is called, the handler iterates `sharedTagsMap` to find `/products/42` and `/products/99`, then batch-deletes them from Redis in a single `UNLINK` call. With the `tagIndex` option, `sharedTagsMap` also keeps a tag → keys index, so the handler looks up the keys of the tags instead of scanning every entry. `SyncedMap` feeds the index from the same place that changes the map (set, delete, and each `HSCAN` batch of a reload).
+When `revalidateTag("product")` is called, the handler iterates `sharedTagsMap` to find `/products/42` and `/products/99`, then deletes them from Redis with one `UNLINK` for each hash slot of the keys. With the `tagIndex` option, `sharedTagsMap` also keeps a tag → keys index, so the handler looks up the keys of the tags instead of scanning every entry. `SyncedMap` feeds the index from the same place that changes the map (set, delete, and each `HSCAN` batch of a reload).
 
 ---
 
@@ -405,7 +405,7 @@ flowchart TD
    - `{ expire: 0 }`: `{ stale: now, expired: now }` — blocking miss, same HTTP effect.
    - `{ expire: N }` including `'max'` (~1 year) and `'default'` (`INFINITE_CACHE`): `{ stale: now, expired: now + N * 1000 }`. `get()` returns the entry with `revalidate: -1` until `expired`. Past `expired`, `areTagsExpired` is a miss.
 
-3. **Batch deletion (ISR only)**: `RedisStringsHandler.revalidateTag` deletes matching Redis keys in a single `UNLINK`. Cache Components leaves keys in place; `get()` drops them only after `areTagsExpired`.
+3. **Batch deletion (ISR only)**: `RedisStringsHandler.revalidateTag` deletes matching Redis keys with one `UNLINK` for each hash slot, at most `revalidateTagDeleteConcurrency` at a time. Cache Components leaves keys in place; `get()` drops them only after `areTagsExpired`.
 
 4. **Cross-instance propagation**: Tag-manifest writes publish via Pub/Sub, so all instances see `{ stale, expired }` without waiting for `refreshTags()`.
 
